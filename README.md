@@ -151,9 +151,9 @@ Type selection is left to the model from the diff; there's no flag to pin a type
 
 ## Status
 
-v0.2 — works end to end against OpenAI and OpenAI-compatible local servers.
+v0.3 — works end to end against OpenAI and OpenAI-compatible local servers.
 Follows Conventional Commits by default, installs globally via `core.hooksPath`,
-and cancels cleanly on Ctrl-C.
+shows a spinner while the model runs, and cancels cleanly on Ctrl-C.
 
 **Model quality is the gating factor**, especially for *generating* messages
 (bare `git crux` / empty `git commit`), which needs a capable model with enough
