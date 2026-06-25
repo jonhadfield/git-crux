@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,7 +11,7 @@ import (
 
 // runCommit handles `git crux -m "..."`: evaluate the message against the
 // staged diff, optionally refine it, then create the commit.
-func runCommit(args []string) error {
+func runCommit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("crux", flag.ExitOnError)
 	msg := fs.String("m", "", "commit message (omit to have git-crux generate one)")
 	model := fs.String("model", modelName(), "model to use")
@@ -29,7 +30,7 @@ func runCommit(args []string) error {
 	}
 
 	if *dryRun {
-		v, err := evaluate(*msg, diff, *model)
+		v, err := evaluate(ctx, *msg, diff, *model)
 		if err != nil {
 			return err
 		}
@@ -43,12 +44,12 @@ func runCommit(args []string) error {
 		if *noAI || os.Getenv("GIT_CRUX_SKIP") != "" {
 			return fmt.Errorf(`a commit message is required when AI is disabled: git crux -m "..."`)
 		}
-		return generateAndCommit(diff, *model)
+		return generateAndCommit(ctx, diff, *model)
 	}
 
 	final := *msg
 	if !*noAI && os.Getenv("GIT_CRUX_SKIP") == "" {
-		final = refine(*msg, diff, *model)
+		final = refine(ctx, *msg, diff, *model)
 	}
 
 	return commit(final)
@@ -57,8 +58,8 @@ func runCommit(args []string) error {
 // generateAndCommit has the model write a commit message for the staged diff
 // (with no seed message), lets an interactive user accept or edit it, then
 // commits. Non-interactively it commits the generated message as-is.
-func generateAndCommit(diff, model string) error {
-	v, err := evaluate("", diff, model)
+func generateAndCommit(ctx context.Context, diff, model string) error {
+	v, err := evaluate(ctx, "", diff, model)
 	if err != nil {
 		return fmt.Errorf("generating commit message: %w", err)
 	}
@@ -77,10 +78,10 @@ func generateAndCommit(diff, model string) error {
 
 // refine evaluates the message and, if it is off-point, prompts the user.
 // It always FAILS OPEN: any error returns the original message unchanged.
-func refine(original, diff, model string) string {
-	v, err := evaluate(original, diff, model)
+func refine(ctx context.Context, original, diff, model string) string {
+	v, err := evaluate(ctx, original, diff, model)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "git-crux:", err, "(committing as-is)")
+		fmt.Fprintln(os.Stderr, "git-crux:", err, "(committing as-is; set GIT_CRUX_SKIP=1 to skip checks)")
 		return original
 	}
 	if v.Verdict == "accurate" || strings.TrimSpace(v.Suggestion) == "" {
