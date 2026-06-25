@@ -141,6 +141,36 @@ func modelName() string {
 	return localModel
 }
 
+// Commit-message styles. conventional is the default: git-crux follows the
+// Conventional Commits standard (type-prefixed subjects) unless GIT_CRUX_STYLE
+// or -style asks for the plain imperative style instead.
+const (
+	stylePlain        = "plain"
+	styleConventional = "conventional"
+	defaultStyle      = styleConventional
+)
+
+// commitStyle resolves the active style: an explicit value (from the -style
+// flag) wins, then GIT_CRUX_STYLE, then the default. An unrecognised value falls
+// back to the default with a warning so a typo never silently changes behavior.
+func commitStyle(flag string) string {
+	v := strings.TrimSpace(flag)
+	if v == "" {
+		v = strings.TrimSpace(os.Getenv("GIT_CRUX_STYLE"))
+	}
+	switch strings.ToLower(v) {
+	case "":
+		return defaultStyle
+	case stylePlain:
+		return stylePlain
+	case styleConventional:
+		return styleConventional
+	default:
+		fmt.Fprintf(os.Stderr, "git-crux: unknown style %q; using %q\n", v, defaultStyle)
+		return defaultStyle
+	}
+}
+
 // apiKey is optional; LM Studio ignores it, hosted OpenAI requires it. We fall
 // back to the conventional OPENAI_API_KEY so pointing git-crux at OpenAI needs
 // only a base URL and model, not a duplicated key.
@@ -183,10 +213,10 @@ var verdictResponseFormat = map[string]any{
 // This discovers the real limit empirically rather than trusting a guess, which
 // matters because a model can be loaded with a smaller window than its nominal
 // maximum (e.g. phi-4 loaded at 8K instead of 16K).
-func evaluate(ctx context.Context, message, diff, model string) (*verdict, error) {
+func evaluate(ctx context.Context, message, diff, model, style string) (*verdict, error) {
 	budget := diffBudget(model)
 	for {
-		v, err := evaluateWithBudget(ctx, message, diff, model, budget)
+		v, err := evaluateWithBudget(ctx, message, diff, model, style, budget)
 		if err == nil || !isContextOverflow(err) || budget <= minDiffChars {
 			return v, err
 		}
@@ -213,11 +243,11 @@ func isContextOverflow(err error) bool {
 
 // evaluateWithBudget performs one /chat/completions call, sending at most budget
 // bytes of diff.
-func evaluateWithBudget(ctx context.Context, message, diff, model string, budget int) (*verdict, error) {
+func evaluateWithBudget(ctx context.Context, message, diff, model, style string, budget int) (*verdict, error) {
 	reqBody, err := json.Marshal(map[string]any{
 		"model": model,
 		"messages": []chatMessage{
-			{Role: "system", Content: systemPrompt},
+			{Role: "system", Content: systemPrompt(style)},
 			{Role: "user", Content: userPrompt(message, diffSummary(diff), truncateDiff(diff, budget))},
 		},
 		"temperature":     0,
@@ -320,7 +350,18 @@ func parseVerdict(content string) (*verdict, error) {
 	return nil, fmt.Errorf("could not parse model output as JSON: %q", truncate(content, 200))
 }
 
-const systemPrompt = `You review git commit messages. You are given a developer's commit message and the actual staged diff. Judge whether the message describes the change well enough to be useful in the project history.
+// systemPrompt assembles the model instructions for the active commit style.
+// A shared head (verdict logic, multi-file handling) is followed by
+// style-specific format rules and examples, so prompt tuning of the common
+// parts happens in one place.
+func systemPrompt(style string) string {
+	if style == styleConventional {
+		return promptHead + promptFormatConventional + promptAbsolute + examplesConventional
+	}
+	return promptHead + promptFormatPlain + promptAbsolute + examplesPlain
+}
+
+const promptHead = `You review git commit messages. You are given a developer's commit message and the actual staged diff. Judge whether the message describes the change well enough to be useful in the project history.
 
 Choose the verdict in THIS PRIORITY ORDER:
 1. "wrong": the message describes something that does NOT appear in the diff; the subject is mismatched (e.g. the message mentions the README but the diff only touches code).
@@ -337,7 +378,9 @@ Multi-file commits:
 - When the diff touches several files, judge and summarize the change AS A WHOLE, not whichever file appears first. The diff is ordered by filename, so a documentation file may lead even when the substantive work is elsewhere.
 - A "Files changed" list (largest change first) precedes the diff. Use it to locate where the substance is. The SUBJECT line should reflect the dominant change; prefer functional code changes over documentation, comments, or formatting when ranking. The BODY bullets then cover the other notable changes so nothing significant is dropped.
 - The subject describes the overall intent of the commit, not one incidental file.
+`
 
+const promptFormatPlain = `
 Output rules:
 - Respond with ONLY the JSON object, no prose or markdown fences.
 - "suggestion": when the verdict is NOT "accurate", a COMPLETE commit message describing THIS diff; otherwise "".
@@ -348,9 +391,46 @@ Output rules:
   * PRESERVE the developer's stated intent — their message is a seed. If it frames the commit (e.g. "initial." means this IS the initial commit), keep that meaning in the subject and expand in the body.
   * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a complete commit message for the diff from scratch.
 - "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change or mismatch. NEVER simply repeat the verdict word.
+`
 
+const promptFormatConventional = `
+This project follows the Conventional Commits standard (https://www.conventionalcommits.org). Every commit subject MUST begin with a type prefix: "<type>: " or "<type>(<scope>): ".
+
+Allowed types, and when each applies:
+- feat: a new user-facing capability or behavior.
+- fix: corrects broken or incorrect behavior.
+- perf: improves performance without changing behavior.
+- refactor: restructures code without changing behavior or adding a feature.
+- docs: documentation only.
+- test: adds or corrects tests only.
+- build: build system, packaging, or dependency changes.
+- ci: CI configuration or scripts (e.g. GitHub Actions, .github/workflows).
+- style: formatting/whitespace only, no change in code meaning.
+- chore: maintenance that fits no other type.
+- revert: reverts a previous commit.
+Choose the type that matches the DOMINANT change in the diff (use the "Files changed" map). If the change is a breaking API change, append "!" after the type or scope (e.g. "feat!:" or "feat(api)!:").
+
+How the prefix affects the verdict:
+- A message is "accurate" ONLY IF it both (a) conveys the main intent AND (b) already begins with a valid type prefix appropriate to the diff.
+- If the wording describes the change well but the type prefix is MISSING, choose "vague"; if a prefix is present but names the WRONG type for the diff, choose "wrong". State the prefix problem in "reason".
+
+Output rules:
+- Respond with ONLY the JSON object, no prose or markdown fences.
+- "suggestion": when the verdict is NOT "accurate", a COMPLETE Conventional Commits message for THIS diff; otherwise "".
+  Format: "<type>(<optional scope>): <imperative description>" as the subject line, 72 characters or fewer. When the diff touches several files or makes more than one notable change, follow the subject with a blank line and "- " bullet lines, one per notable change, ordered by importance.
+  Rules for the suggestion:
+  * Always begin with a valid type prefix. Add the blank line and "- " bullets ONLY when the diff touches several files or makes more than one notable change; a small single-purpose change is just the prefixed subject.
+  * Order bullets by importance; use the "Files changed" map so no significant area is missed; describe behavior or areas, not bare filenames.
+  * PRESERVE the developer's stated intent — their message is a seed. If their message already implies a type, honor it unless the diff contradicts it. If it frames the commit (e.g. "initial." means this IS the initial commit), keep that meaning after the prefix.
+  * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a complete Conventional Commits message for the diff from scratch.
+- "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change, mismatch, or missing/incorrect type. NEVER simply repeat the verdict word.
+`
+
+const promptAbsolute = `
 ABSOLUTE RULE: Describe ONLY what THIS diff changes. Do NOT copy or adapt wording from these instructions or the examples below. Words like "login", "retry", "queue", "worker", "Redis", "search", "debounce", "API" must NOT appear in your output unless they genuinely appear in the diff. If you cannot ground a bullet in the diff, omit it.
+`
 
+const examplesPlain = `
 Examples (these illustrate the verdict choice and the JSON shape ONLY — never reuse their wording):
 - diff adds input validation to a login handler, message "stuff":
 {"verdict":"vague","suggestion":"Validate email and password in login handler","reason":"message names no part of the change"}
@@ -360,6 +440,19 @@ Examples (these illustrate the verdict choice and the JSON shape ONLY — never 
 {"verdict":"vague","suggestion":"Initial commit: scaffold the job queue worker\n\n- Add the worker entry point with graceful shutdown\n- Add a Redis-backed queue client\n- Load worker settings from environment variables","reason":"message names nothing about the change"}
 - diff adds debounce to a search handler AND bumps the API base URL from v1 to v2, message "add debounce to search":
 {"verdict":"incomplete","suggestion":"Debounce search input and upgrade API base URL to v2","reason":"unrelated API version bump not mentioned"}`
+
+const examplesConventional = `
+Examples (these illustrate the verdict choice and the JSON shape ONLY — never reuse their wording):
+- diff adds input validation to a login handler, message "stuff":
+{"verdict":"vague","suggestion":"feat: validate email and password in login handler","reason":"generic message with no type prefix"}
+- diff adds a retry loop with exponential backoff to upload(), message "feat: add retry with exponential backoff to upload":
+{"verdict":"accurate","suggestion":"","reason":"valid feat prefix matching the change"}
+- diff corrects an off-by-one in pagination bounds, message "correct pagination off-by-one":
+{"verdict":"vague","suggestion":"fix: correct off-by-one in pagination bounds","reason":"accurate wording but missing fix prefix"}
+- diff only edits the CI workflow file, message "feat: update build":
+{"verdict":"wrong","suggestion":"ci: update GitHub Actions workflow","reason":"diff is CI config, not a feature"}
+- diff adds a worker entry point, a Redis queue client, and a config loader across several new files, message "initial.":
+{"verdict":"vague","suggestion":"feat: scaffold the job queue worker\n\n- Add the worker entry point with graceful shutdown\n- Add a Redis-backed queue client\n- Load worker settings from environment variables","reason":"message names nothing about the change"}`
 
 func userPrompt(message, summary, diff string) string {
 	var b strings.Builder

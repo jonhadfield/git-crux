@@ -163,6 +163,7 @@ func runHook(ctx context.Context, args []string) error {
 	if err != nil || strings.TrimSpace(diff) == "" {
 		return nil // nothing to work with; fail open
 	}
+	style := commitStyle("") // hook has no flags; honor GIT_CRUX_STYLE or the default
 
 	// Empty message on a plain `git commit` (source is empty — no -m, no
 	// template): generate a message and drop it into the editor buffer. The
@@ -172,7 +173,7 @@ func runHook(ctx context.Context, args []string) error {
 		if source != "" {
 			return nil // a template or other prefilled source; leave it alone
 		}
-		v, err := evaluate(ctx, "", diff, modelName())
+		v, err := evaluate(ctx, "", diff, modelName(), style)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "git-crux:", err)
 			return nil
@@ -184,7 +185,7 @@ func runHook(ctx context.Context, args []string) error {
 	}
 
 	// Non-empty message: judge it and, if off-point, offer a sharper one.
-	v, err := evaluate(ctx, original, diff, modelName())
+	v, err := evaluate(ctx, original, diff, modelName(), style)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "git-crux:", err)
 		return nil // model unreachable; never block the commit

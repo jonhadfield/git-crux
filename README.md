@@ -3,7 +3,10 @@
 A small Go CLI that keeps commit messages **on point**. It compares the message
 you wrote against the **actual staged diff** and, when the message is vague,
 incomplete, or wrong, suggests a sharper one — anchored on your stated intent
-rather than generating from scratch.
+rather than generating from scratch. By default suggestions follow the
+[Conventional Commits](https://www.conventionalcommits.org) standard
+(`feat:`, `fix:`, `chore:`, …); set `GIT_CRUX_STYLE=plain` for a plain imperative
+subject instead.
 
 It talks to any **OpenAI-compatible** chat endpoint. By default it uses OpenAI's
 `gpt-4o-mini` (reading `OPENAI_API_KEY` from the environment), which produces the
@@ -40,7 +43,7 @@ git add .
 git crux -m "updates my application"
 #   message:  updates my application
 #   verdict:  vague — message is generic and does not describe specific changes
-#   suggest:  Add retry logic with exponential backoff to upload function
+#   suggest:  feat: add retry with exponential backoff to upload function
 #   [A]ccept suggestion / [e]dit / [k]eep original?
 ```
 
@@ -84,6 +87,7 @@ erroring — so it works out of the box whether or not you have a key.
 | `GIT_CRUX_MODEL`     | `gpt-4o-mini`                | Model id to request.                      |
 | `GIT_CRUX_API_KEY`   | _(falls back to `OPENAI_API_KEY`)_ | Bearer token for hosted APIs; ignored by local servers.|
 | `GIT_CRUX_SKIP`      | _(unset)_                    | Set to any value to disable evaluation.   |
+| `GIT_CRUX_STYLE`     | `conventional`               | Message style: `conventional` (Conventional Commits) or `plain` (imperative subject). |
 | `GIT_CRUX_CONTEXT`   | _(auto from model)_          | Model context window in tokens; sizes the diff sent for review. |
 | `GIT_CRUX_MAX_DIFF`  | _(auto from context)_        | Hard cap on diff bytes sent; overrides the context-derived budget. |
 
@@ -93,8 +97,30 @@ erroring — so it works out of the box whether or not you have a key.
 | ----------- | ------------------ | --------------------------------------------- |
 | `-m`        | —                  | Commit message. Omit to have git-crux generate one. |
 | `-model`    | _(resolved at runtime)_ | Model to use. Defaults to `GIT_CRUX_MODEL`, else the active server profile (`gpt-4o-mini` for OpenAI, `microsoft/phi-4` local). |
+| `-style`    | `conventional`     | Message style: `conventional` or `plain` (overrides `GIT_CRUX_STYLE`). |
 | `-no-ai`    | `false`            | Skip evaluation, commit as-is.                |
 | `-dry-run`  | `false`            | Print the verdict JSON and exit.              |
+
+## Message style
+
+By default git-crux follows the
+[Conventional Commits](https://www.conventionalcommits.org) standard: every
+suggested subject begins with a type prefix the model infers from the diff —
+`feat:` for a new capability, `fix:` for a correction, `perf:`, `refactor:`,
+`docs:`, `test:`, `build:`, `ci:`, `style:`, `chore:`, or `revert:`. A breaking
+change is marked with `!` (e.g. `feat!:`). Under this style a message that
+describes the change well but **lacks a valid prefix** is still flagged, so a
+plain `fix login bug` is sharpened to `fix: correct login validation`.
+
+Prefer terse, prefix-free subjects? Switch to the plain imperative style:
+
+```sh
+git crux -m "fix login" -style plain        # one-off
+export GIT_CRUX_STYLE=plain                 # for the session / in your shell rc
+```
+
+Type selection is left to the model from the diff; there's no flag to pin a type
+(write the prefix yourself with `-m` if you want to override it).
 
 ## Behaviour & guardrails
 
