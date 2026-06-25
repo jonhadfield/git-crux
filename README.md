@@ -23,9 +23,23 @@ did?
 
 ## Install
 
+This repository is **private**, so the Go module proxy and checksum database
+can't fetch it. Tell Go to bypass them and use your own git credentials, then
+install:
+
 ```sh
+export GOPRIVATE=github.com/jonhadfield/*
+# authenticate git to GitHub over SSH (one-time):
+git config --global url."git@github.com:".insteadOf "https://github.com/"
+
 go install github.com/jonhadfield/git-crux@latest   # puts `git-crux` on $PATH
 ```
+
+`GOPRIVATE` skips the public proxy/sumdb for this path; the `insteadOf` rewrite
+makes Go fetch over SSH so your existing key authenticates (a personal-access
+token over HTTPS works too). Without both, the install fails with a
+`sum.golang.org … 404` or `could not read Username for https://github.com`.
+Alternatively, build from source (see below).
 
 Because git resolves `git crux` to a `git-crux` binary on `PATH`, you get the
 `git crux` subcommand for free.
