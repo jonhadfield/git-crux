@@ -260,6 +260,13 @@ func evaluateWithBudget(ctx context.Context, message, diff, model, style string,
 
 	// Generous timeout: the first request may trigger a model load.
 	client := &http.Client{Timeout: 90 * time.Second}
+
+	// Show a spinner while we wait. It stops on every return path (including the
+	// context-overflow error), so the outer retry message in evaluate prints to a
+	// clean line. No-op in non-interactive contexts.
+	sp := startSpinner("asking " + model)
+	defer sp.Stop()
+
 	resp, err := doWithRetry(ctx, client, baseURL()+"/chat/completions", reqBody)
 	if err != nil {
 		if ctx.Err() != nil {
