@@ -12,4 +12,7 @@ fmt:
 vet:
 	go vet ./...
 
-.PHONY: build install fmt vet
+test:
+	go test ./...
+
+.PHONY: build install fmt vet test

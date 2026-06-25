@@ -11,17 +11,25 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 const version = "0.1.0"
 
 func main() {
+	// A signal-cancellable context so Ctrl-C aborts an in-flight model call
+	// (which can wait up to 90s on a cold model load) instead of hanging.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	if len(os.Args) < 2 {
 		// Bare `git crux` means: generate a commit message from the staged diff
 		// and commit. `git crux help` still shows usage.
-		if err := runCommit(nil); err != nil {
+		if err := runCommit(ctx, nil); err != nil {
 			fail(err)
 		}
 		return
@@ -34,7 +42,7 @@ func main() {
 		}
 	case "hook":
 		// Hook path must FAIL OPEN: log to stderr but never block the commit.
-		if err := runHook(os.Args[2:]); err != nil {
+		if err := runHook(ctx, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "git-crux:", err)
 		}
 		os.Exit(0)
@@ -44,7 +52,7 @@ func main() {
 		usage()
 	default:
 		// Anything else is treated as the commit path, e.g. `git crux -m "..."`.
-		if err := runCommit(os.Args[1:]); err != nil {
+		if err := runCommit(ctx, os.Args[1:]); err != nil {
 			fail(err)
 		}
 	}
@@ -57,12 +65,14 @@ Usage:
   git crux                  Generate a commit message from staged changes, then commit.
   git crux -m "message"     Evaluate your message against staged changes, then commit.
   git crux init             Install the prepare-commit-msg hook in this repo.
+  git crux init --global    Install the hook for all repos via core.hooksPath.
   git crux version          Print the version.
 
 Commit flags:
   -m string      Commit message. Omit to have git-crux generate one.
-  -model string  Model to use (default "` + defaultModel + `").
+  -model string  Model to use (default: from GIT_CRUX_MODEL, the server profile, or "` + defaultModel + `").
   -no-ai         Skip evaluation and commit as-is.
+  -dry-run       Print the verdict as JSON and exit without committing.
 
 Environment:
   GIT_CRUX_SKIP=1   Disable evaluation for a single command or in the hook.

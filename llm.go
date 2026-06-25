@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,10 +30,10 @@ const (
 	// Diff-budget tuning. The diff sent to the model is sized from the model's
 	// context window rather than a fixed cap, so a small model is not overflowed
 	// and a large one is not needlessly starved.
-	defaultContextTokens = 8192 // assumed window for unrecognised models
-	reservedTokens       = 1500 // system prompt + message wrapper + JSON reply
-	charsPerToken        = 3    // conservative bytes/token, so we under-fill
-	minDiffChars         = 4000 // floor: always show a useful amount
+	defaultContextTokens = 8192  // assumed window for unrecognised models
+	reservedTokens       = 1500  // system prompt + message wrapper + JSON reply
+	charsPerToken        = 3     // conservative bytes/token, so we under-fill
+	minDiffChars         = 4000  // floor: always show a useful amount
 	maxDiffCharsCeil     = 32000 // ceiling: bound local-inference latency & "lost in the middle"
 )
 
@@ -182,10 +183,10 @@ var verdictResponseFormat = map[string]any{
 // This discovers the real limit empirically rather than trusting a guess, which
 // matters because a model can be loaded with a smaller window than its nominal
 // maximum (e.g. phi-4 loaded at 8K instead of 16K).
-func evaluate(message, diff, model string) (*verdict, error) {
+func evaluate(ctx context.Context, message, diff, model string) (*verdict, error) {
 	budget := diffBudget(model)
 	for {
-		v, err := evaluateWithBudget(message, diff, model, budget)
+		v, err := evaluateWithBudget(ctx, message, diff, model, budget)
 		if err == nil || !isContextOverflow(err) || budget <= minDiffChars {
 			return v, err
 		}
@@ -212,7 +213,7 @@ func isContextOverflow(err error) bool {
 
 // evaluateWithBudget performs one /chat/completions call, sending at most budget
 // bytes of diff.
-func evaluateWithBudget(message, diff, model string, budget int) (*verdict, error) {
+func evaluateWithBudget(ctx context.Context, message, diff, model string, budget int) (*verdict, error) {
 	reqBody, err := json.Marshal(map[string]any{
 		"model": model,
 		"messages": []chatMessage{
@@ -227,19 +228,13 @@ func evaluateWithBudget(message, diff, model string, budget int) (*verdict, erro
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, baseURL()+"/chat/completions", bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if k := apiKey(); k != "" {
-		req.Header.Set("Authorization", "Bearer "+k)
-	}
-
 	// Generous timeout: the first request may trigger a model load.
 	client := &http.Client{Timeout: 90 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(ctx, client, baseURL()+"/chat/completions", reqBody)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("calling model server at %s (is LM Studio running?): %w", baseURL(), err)
 	}
 	defer resp.Body.Close()
@@ -270,6 +265,41 @@ func evaluateWithBudget(message, diff, model string, budget int) (*verdict, erro
 	v.Verdict = strings.ToLower(strings.TrimSpace(v.Verdict))
 	v.Suggestion = strings.TrimSpace(v.Suggestion)
 	return v, nil
+}
+
+// doWithRetry POSTs body to url, retrying once after a short pause on a transient
+// network error (connection refused/reset, dial timeout). It does NOT retry once
+// the server has answered — a non-2xx status comes back to the caller on the
+// first try — nor when ctx is cancelled, so Ctrl-C aborts immediately. A fresh
+// request is built per attempt because the body reader is consumed each time.
+func doWithRetry(ctx context.Context, client *http.Client, url string, body []byte) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if k := apiKey(); k != "" {
+			req.Header.Set("Authorization", "Bearer "+k)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err // cancelled or timed out: do not retry
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 // parseVerdict unmarshals the model's content, tolerating models that wrap the

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -118,7 +119,7 @@ func TestEvaluateRetriesOnOverflow(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
 	diff := strings.Repeat("diff --git a/f.go b/f.go\n+line\n", 4000) // large enough to halve and still exceed the floor
-	v, err := evaluate("msg", diff, "microsoft/phi-4")
+	v, err := evaluate(context.Background(), "msg", diff, "microsoft/phi-4")
 	if err != nil {
 		t.Fatalf("expected success after retry, got %v", err)
 	}
@@ -141,11 +142,87 @@ func TestEvaluateNoRetryOnOtherErrors(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
-	if _, err := evaluate("msg", "diff --git a/f b/f\n+x\n", "microsoft/phi-4"); err == nil {
+	if _, err := evaluate(context.Background(), "msg", "diff --git a/f b/f\n+x\n", "microsoft/phi-4"); err == nil {
 		t.Fatal("expected error")
 	}
 	if calls != 1 {
 		t.Errorf("expected no retry, got %d calls", calls)
+	}
+}
+
+// TestParseVerdict covers the messy shapes a local model may wrap its JSON in:
+// bare object, markdown fences, and surrounding prose.
+func TestParseVerdict(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    verdict
+	}{
+		{
+			name:    "bare object",
+			content: `{"verdict":"vague","suggestion":"Do the thing","reason":"too generic"}`,
+			want:    verdict{"vague", "Do the thing", "too generic"},
+		},
+		{
+			name:    "markdown fenced",
+			content: "```json\n{\"verdict\":\"accurate\",\"suggestion\":\"\",\"reason\":\"matches\"}\n```",
+			want:    verdict{"accurate", "", "matches"},
+		},
+		{
+			name:    "wrapped in prose",
+			content: `Sure! Here is the verdict: {"verdict":"wrong","suggestion":"Fix it","reason":"mismatch"} Hope that helps.`,
+			want:    verdict{"wrong", "Fix it", "mismatch"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseVerdict(c.content)
+			if err != nil {
+				t.Fatalf("parseVerdict(%q) errored: %v", c.content, err)
+			}
+			if *got != c.want {
+				t.Errorf("parseVerdict(%q) = %+v, want %+v", c.content, *got, c.want)
+			}
+		})
+	}
+}
+
+func TestParseVerdictRejectsNonJSON(t *testing.T) {
+	if _, err := parseVerdict("I cannot help with that."); err == nil {
+		t.Error("expected error for content with no JSON object")
+	}
+}
+
+// TestEvaluateRetriesOnTransientNetworkError drops the first connection before
+// any response (a transport error), then answers the retry — proving a one-off
+// network blip self-heals rather than failing the whole evaluation.
+func TestEvaluateRetriesOnTransientNetworkError(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("ResponseWriter is not a Hijacker")
+			}
+			conn, _, _ := hj.Hijack()
+			conn.Close() // no response → client sees a transport error
+			return
+		}
+		io.WriteString(w, `{"choices":[{"message":{"content":"{\"verdict\":\"accurate\",\"suggestion\":\"\",\"reason\":\"ok\"}"}}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+
+	v, err := evaluate(context.Background(), "msg", "diff --git a/f b/f\n+x\n", "gpt-4o")
+	if err != nil {
+		t.Fatalf("expected success after transient retry, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected exactly 2 calls (1 fail + 1 retry), got %d", calls)
+	}
+	if v.Verdict != "accurate" {
+		t.Errorf("verdict = %q, want accurate", v.Verdict)
 	}
 }
 

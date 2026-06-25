@@ -86,6 +86,23 @@ func TestTruncateDiffSmallDiffUnchanged(t *testing.T) {
 	}
 }
 
+func TestStripComments(t *testing.T) {
+	in := "Add retry logic\n\nbody line\n# Please enter the commit message for your changes.\n#\n# On branch main\n"
+	want := "Add retry logic\n\nbody line"
+	if got := stripComments(in); got != want {
+		t.Errorf("stripComments:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestStripCommentsAllComments returns "" when nothing but git's template remains,
+// which is what triggers the generate-from-scratch path in the hook.
+func TestStripCommentsAllComments(t *testing.T) {
+	in := "# Please enter the commit message for your changes.\n#\n# Changes to be committed:\n"
+	if got := stripComments(in); got != "" {
+		t.Errorf("expected empty, got %q", got)
+	}
+}
+
 func TestIndent(t *testing.T) {
 	in := "Initial commit: x\n\n- one\n- two\n"
 	want := "    Initial commit: x\n\n    - one\n    - two"

@@ -52,6 +52,15 @@ git commit -m "fix"    # git-crux steps in only if the message is off-point
 git commit             # no -m: git-crux pre-fills the editor with a generated message
 ```
 
+To cover **every** repository at once, install globally via git's `core.hooksPath`:
+
+```sh
+git crux init --global   # installs into ~/.config/git/hooks and points core.hooksPath there
+```
+
+Note: `core.hooksPath` replaces per-repo `.git/hooks`, so any existing repo-local
+hooks won't run unless moved into the shared directory.
+
 With no `-m`, the generated message lands in your `$EDITOR` — edit and save to
 accept, or empty the buffer to abort. (Merge, squash, and amend commits are left
 untouched.)
@@ -82,8 +91,8 @@ erroring — so it works out of the box whether or not you have a key.
 
 | Flag        | Default            | Meaning                                       |
 | ----------- | ------------------ | --------------------------------------------- |
-| `-m`        | —                  | Commit message (required).                    |
-| `-model`    | `gpt-4o-mini`      | Model to use (overrides `GIT_CRUX_MODEL`).    |
+| `-m`        | —                  | Commit message. Omit to have git-crux generate one. |
+| `-model`    | _(resolved at runtime)_ | Model to use. Defaults to `GIT_CRUX_MODEL`, else the active server profile (`gpt-4o-mini` for OpenAI, `microsoft/phi-4` local). |
 | `-no-ai`    | `false`            | Skip evaluation, commit as-is.                |
 | `-dry-run`  | `false`            | Print the verdict JSON and exit.              |
 
@@ -112,8 +121,9 @@ are requested at `temperature 0` for determinism. This is an MVP: the prompt is
 tuned against a small scenario set, not a broad benchmark, so expect rough edges
 on unusual diffs.
 
-Obvious next steps: a global install (`core.hooksPath`), a curated evaluation
-set to measure precision/recall before prompt changes, and large-diff chunking.
+Obvious next steps: a curated evaluation set to measure precision/recall before
+prompt changes, and large-diff chunking. (Global install via `core.hooksPath` is
+done — see `git crux init --global`.)
 
 ## Build from source
 
