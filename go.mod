@@ -1,3 +1,3 @@
-module github.com/hadfielj/git-crux
+module github.com/jonhadfield/git-crux
 
 go 1.22

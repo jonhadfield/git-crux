@@ -21,7 +21,7 @@ did?
 ## Install
 
 ```sh
-go install github.com/hadfielj/git-crux@latest   # puts `git-crux` on $PATH
+go install github.com/jonhadfield/git-crux@latest   # puts `git-crux` on $PATH
 ```
 
 Because git resolves `git crux` to a `git-crux` binary on `PATH`, you get the
