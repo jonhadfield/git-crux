@@ -71,11 +71,13 @@ Usage:
 Commit flags:
   -m string      Commit message. Omit to have git-crux generate one.
   -model string  Model to use (default: from GIT_CRUX_MODEL, the server profile, or "` + defaultModel + `").
+  -style string  Message style: conventional|plain (default "` + defaultStyle + `").
   -no-ai         Skip evaluation and commit as-is.
   -dry-run       Print the verdict as JSON and exit without committing.
 
 Environment:
-  GIT_CRUX_SKIP=1   Disable evaluation for a single command or in the hook.
+  GIT_CRUX_SKIP=1        Disable evaluation for a single command or in the hook.
+  GIT_CRUX_STYLE=plain   Use the plain imperative style instead of Conventional Commits.
 `)
 }
 

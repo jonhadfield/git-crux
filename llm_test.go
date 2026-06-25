@@ -119,7 +119,7 @@ func TestEvaluateRetriesOnOverflow(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
 	diff := strings.Repeat("diff --git a/f.go b/f.go\n+line\n", 4000) // large enough to halve and still exceed the floor
-	v, err := evaluate(context.Background(), "msg", diff, "microsoft/phi-4")
+	v, err := evaluate(context.Background(), "msg", diff, "microsoft/phi-4", stylePlain)
 	if err != nil {
 		t.Fatalf("expected success after retry, got %v", err)
 	}
@@ -142,7 +142,7 @@ func TestEvaluateNoRetryOnOtherErrors(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
-	if _, err := evaluate(context.Background(), "msg", "diff --git a/f b/f\n+x\n", "microsoft/phi-4"); err == nil {
+	if _, err := evaluate(context.Background(), "msg", "diff --git a/f b/f\n+x\n", "microsoft/phi-4", stylePlain); err == nil {
 		t.Fatal("expected error")
 	}
 	if calls != 1 {
@@ -214,7 +214,7 @@ func TestEvaluateRetriesOnTransientNetworkError(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
-	v, err := evaluate(context.Background(), "msg", "diff --git a/f b/f\n+x\n", "gpt-4o")
+	v, err := evaluate(context.Background(), "msg", "diff --git a/f b/f\n+x\n", "gpt-4o", stylePlain)
 	if err != nil {
 		t.Fatalf("expected success after transient retry, got %v", err)
 	}
@@ -223,6 +223,64 @@ func TestEvaluateRetriesOnTransientNetworkError(t *testing.T) {
 	}
 	if v.Verdict != "accurate" {
 		t.Errorf("verdict = %q, want accurate", v.Verdict)
+	}
+}
+
+func TestCommitStyle(t *testing.T) {
+	t.Run("flag wins over env", func(t *testing.T) {
+		t.Setenv("GIT_CRUX_STYLE", "conventional")
+		if got := commitStyle("plain"); got != stylePlain {
+			t.Errorf("flag override = %q, want %q", got, stylePlain)
+		}
+	})
+	t.Run("env when no flag", func(t *testing.T) {
+		t.Setenv("GIT_CRUX_STYLE", "plain")
+		if got := commitStyle(""); got != stylePlain {
+			t.Errorf("env value = %q, want %q", got, stylePlain)
+		}
+	})
+	t.Run("default is conventional", func(t *testing.T) {
+		t.Setenv("GIT_CRUX_STYLE", "")
+		if got := commitStyle(""); got != styleConventional {
+			t.Errorf("default = %q, want %q", got, styleConventional)
+		}
+	})
+	t.Run("unknown falls back to default", func(t *testing.T) {
+		t.Setenv("GIT_CRUX_STYLE", "")
+		if got := commitStyle("emoji"); got != defaultStyle {
+			t.Errorf("unknown style = %q, want default %q", got, defaultStyle)
+		}
+	})
+	t.Run("case-insensitive", func(t *testing.T) {
+		t.Setenv("GIT_CRUX_STYLE", "")
+		if got := commitStyle("Plain"); got != stylePlain {
+			t.Errorf("mixed case = %q, want %q", got, stylePlain)
+		}
+	})
+}
+
+// TestSystemPromptStyle confirms each style injects its own format rules: the
+// conventional prompt names the standard and the type vocabulary; the plain one
+// does neither.
+func TestSystemPromptStyle(t *testing.T) {
+	conv := systemPrompt(styleConventional)
+	if !strings.Contains(conv, "Conventional Commits") {
+		t.Error("conventional prompt missing the standard's name")
+	}
+	for _, typ := range []string{"feat:", "fix:", "chore:", "refactor:"} {
+		if !strings.Contains(conv, typ) {
+			t.Errorf("conventional prompt missing type %q", typ)
+		}
+	}
+	plain := systemPrompt(stylePlain)
+	if strings.Contains(plain, "Conventional Commits") {
+		t.Error("plain prompt should not mention Conventional Commits")
+	}
+	// Both styles share the verdict vocabulary.
+	for _, p := range []string{conv, plain} {
+		if !strings.Contains(p, `"incomplete"`) {
+			t.Error("prompt missing shared verdict vocabulary")
+		}
 	}
 }
 

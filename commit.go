@@ -15,11 +15,13 @@ func runCommit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("crux", flag.ExitOnError)
 	msg := fs.String("m", "", "commit message (omit to have git-crux generate one)")
 	model := fs.String("model", modelName(), "model to use")
+	styleFlag := fs.String("style", "", "message style: conventional|plain (default conventional)")
 	noAI := fs.Bool("no-ai", false, "skip AI evaluation, commit as-is")
 	dryRun := fs.Bool("dry-run", false, "print the verdict as JSON and exit without committing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	style := commitStyle(*styleFlag)
 
 	diff, err := stagedDiff()
 	if err != nil {
@@ -30,7 +32,7 @@ func runCommit(ctx context.Context, args []string) error {
 	}
 
 	if *dryRun {
-		v, err := evaluate(ctx, *msg, diff, *model)
+		v, err := evaluate(ctx, *msg, diff, *model, style)
 		if err != nil {
 			return err
 		}
@@ -44,12 +46,12 @@ func runCommit(ctx context.Context, args []string) error {
 		if *noAI || os.Getenv("GIT_CRUX_SKIP") != "" {
 			return fmt.Errorf(`a commit message is required when AI is disabled: git crux -m "..."`)
 		}
-		return generateAndCommit(ctx, diff, *model)
+		return generateAndCommit(ctx, diff, *model, style)
 	}
 
 	final := *msg
 	if !*noAI && os.Getenv("GIT_CRUX_SKIP") == "" {
-		final = refine(ctx, *msg, diff, *model)
+		final = refine(ctx, *msg, diff, *model, style)
 	}
 
 	return commit(final)
@@ -58,8 +60,8 @@ func runCommit(ctx context.Context, args []string) error {
 // generateAndCommit has the model write a commit message for the staged diff
 // (with no seed message), lets an interactive user accept or edit it, then
 // commits. Non-interactively it commits the generated message as-is.
-func generateAndCommit(ctx context.Context, diff, model string) error {
-	v, err := evaluate(ctx, "", diff, model)
+func generateAndCommit(ctx context.Context, diff, model, style string) error {
+	v, err := evaluate(ctx, "", diff, model, style)
 	if err != nil {
 		return fmt.Errorf("generating commit message: %w", err)
 	}
@@ -78,8 +80,8 @@ func generateAndCommit(ctx context.Context, diff, model string) error {
 
 // refine evaluates the message and, if it is off-point, prompts the user.
 // It always FAILS OPEN: any error returns the original message unchanged.
-func refine(ctx context.Context, original, diff, model string) string {
-	v, err := evaluate(ctx, original, diff, model)
+func refine(ctx context.Context, original, diff, model, style string) string {
+	v, err := evaluate(ctx, original, diff, model, style)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "git-crux:", err, "(committing as-is; set GIT_CRUX_SKIP=1 to skip checks)")
 		return original
