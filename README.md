@@ -32,7 +32,7 @@ export GOPRIVATE=github.com/jonhadfield/*
 # authenticate git to GitHub over SSH (one-time):
 git config --global url."git@github.com:".insteadOf "https://github.com/"
 
-go install github.com/jonhadfield/git-crux@v0.3.0   # puts `git-crux` on $PATH
+go install github.com/jonhadfield/git-crux@latest   # puts `git-crux` on $PATH
 ```
 
 `GOPRIVATE` skips the public proxy/sumdb for this path; the `insteadOf` rewrite
