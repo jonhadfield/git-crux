@@ -1,0 +1,5 @@
+{
+  "verdict": "wrong",
+  "style": "plain",
+  "notes": "Message claims a README change but the diff only touches parser.go."
+}

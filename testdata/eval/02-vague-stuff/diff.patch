@@ -1,0 +1,12 @@
+diff --git a/signup.go b/signup.go
+index aaaaaaa..bbbbbbb 100644
+--- a/signup.go
++++ b/signup.go
+@@ -8,6 +8,10 @@ func Signup(w http.ResponseWriter, r *http.Request) {
+ 	email := r.FormValue("email")
++	if !strings.Contains(email, "@") {
++		http.Error(w, "invalid email address", http.StatusBadRequest)
++		return
++	}
+ 	createAccount(email)
+ }

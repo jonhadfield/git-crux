@@ -1,0 +1,17 @@
+diff --git a/logger.go b/logger.go
+new file mode 100644
+index 0000000..bbbbbbb
+--- /dev/null
++++ b/logger.go
+@@ -0,0 +1,11 @@
++package log
++
++import "fmt"
++
++type Logger struct{ prefix string }
++
++func New(prefix string) *Logger { return &Logger{prefix: prefix} }
++
++func (l *Logger) Info(msg string) {
++	fmt.Println(l.prefix, msg)
++}

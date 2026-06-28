@@ -1,0 +1,5 @@
+{
+  "verdict": "wrong",
+  "style": "conventional",
+  "notes": "Diff is CI config, so the feat type is wrong; should be ci."
+}

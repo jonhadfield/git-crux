@@ -1,0 +1,10 @@
+diff --git a/page.go b/page.go
+index ccccccc..ddddddd 100644
+--- a/page.go
++++ b/page.go
+@@ -3,5 +3,5 @@ package list
+
+ func pageBounds(total, size int) int {
+-	return total/size + 1
++	return (total + size - 1) / size
+ }

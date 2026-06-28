@@ -1,0 +1,10 @@
+diff --git a/parser.go b/parser.go
+index 7777777..8888888 100644
+--- a/parser.go
++++ b/parser.go
+@@ -4,5 +4,5 @@ package csv
+
+ func fields(s string) []string {
+-	return strings.Split(s, ",")
++	return strings.Split(strings.TrimSpace(s), ",")
+ }
