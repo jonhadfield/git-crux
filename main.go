@@ -18,7 +18,7 @@ import (
 	"syscall"
 )
 
-const version = "0.4.0"
+const version = "1.0.0"
 
 func main() {
 	// A signal-cancellable context so Ctrl-C aborts an in-flight model call

@@ -155,7 +155,7 @@ Type selection is left to the model from the diff; there's no flag to pin a type
 
 ## Status
 
-v0.4 — works end to end against OpenAI and OpenAI-compatible local servers.
+v1.0 — works end to end against OpenAI and OpenAI-compatible local servers.
 Follows Conventional Commits by default, installs globally via `core.hooksPath`,
 chunks large diffs, shows a spinner while the model runs, and cancels cleanly on
 Ctrl-C.
@@ -164,8 +164,8 @@ Ctrl-C.
 (bare `git crux` / empty `git commit`), which needs a capable model with enough
 context: `gpt-4o-mini` is reliable, while small local models (e.g. an 8K-context
 `microsoft/phi-4`) tend to parrot the prompt or truncate large diffs. Verdicts
-are requested at `temperature 0` for determinism. This is an MVP: the prompt is
-tuned against a small scenario set, not a broad benchmark, so expect rough edges
+are requested at `temperature 0` for determinism. The prompt is tuned against the
+curated evaluation set (see above), not a broad benchmark, so expect rough edges
 on unusual diffs.
 
 ## Evaluation set
