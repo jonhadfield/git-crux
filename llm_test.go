@@ -101,9 +101,10 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-// TestEvaluateRetriesOnOverflow drives evaluate against a server that rejects
-// the first (oversized) prompt with a context-length 400, then accepts the
-// halved retry — proving the budget self-corrects to the real context.
+// TestEvaluateRetriesOnOverflow drives the whole-diff path against a server that
+// rejects the first prompt with a context-length 400, then accepts the halved
+// retry — proving the budget self-corrects to the model's real context. The diff
+// is kept under the budget so it takes evaluateWhole, not the chunked path.
 func TestEvaluateRetriesOnOverflow(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +119,9 @@ func TestEvaluateRetriesOnOverflow(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
-	diff := strings.Repeat("diff --git a/f.go b/f.go\n+line\n", 4000) // large enough to halve and still exceed the floor
+	// Single file, ~18KB: under phi-4's 32KB budget (so evaluateWhole runs) but
+	// large enough that one halving still clears the floor.
+	diff := "diff --git a/f.go b/f.go\n--- a/f.go\n+++ b/f.go\n@@ -0,0 +1 @@\n" + strings.Repeat("+line\n", 3000)
 	v, err := evaluate(context.Background(), "msg", diff, "microsoft/phi-4", stylePlain)
 	if err != nil {
 		t.Fatalf("expected success after retry, got %v", err)
@@ -128,6 +131,42 @@ func TestEvaluateRetriesOnOverflow(t *testing.T) {
 	}
 	if v.Verdict != "vague" {
 		t.Errorf("verdict = %q, want vague", v.Verdict)
+	}
+}
+
+// TestEvaluateChunkedFlow forces the chunked path with a tiny budget and proves
+// the map-reduce shape: several summarize calls (no schema) feed one final
+// verdict call (with schema), whose result is returned.
+func TestEvaluateChunkedFlow(t *testing.T) {
+	var summarizeCalls, verdictCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "json_schema") {
+			verdictCalls++
+			io.WriteString(w, `{"choices":[{"message":{"content":"{\"verdict\":\"vague\",\"suggestion\":\"feat: x\",\"reason\":\"y\"}"}}]}`)
+			return
+		}
+		summarizeCalls++
+		io.WriteString(w, `{"choices":[{"message":{"content":"- changed thing"}}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_MAX_DIFF", "200") // tiny budget → force chunking
+
+	// Three files, each on its own chunk under the 200-byte budget.
+	diff := makeFileDiff("a.go", 80) + makeFileDiff("b.go", 80) + makeFileDiff("c.go", 80)
+	v, err := evaluate(context.Background(), "msg", diff, "gpt-4o", styleConventional)
+	if err != nil {
+		t.Fatalf("chunked evaluate failed: %v", err)
+	}
+	if summarizeCalls < 2 {
+		t.Errorf("expected multiple summarize calls, got %d", summarizeCalls)
+	}
+	if verdictCalls != 1 {
+		t.Errorf("expected exactly one verdict call, got %d", verdictCalls)
+	}
+	if v.Verdict != "vague" || v.Suggestion != "feat: x" {
+		t.Errorf("unexpected verdict: %+v", v)
 	}
 }
 

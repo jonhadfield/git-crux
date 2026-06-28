@@ -143,6 +143,10 @@ Type selection is left to the model from the diff; there's no flag to pin a type
   commit.
 - **Quiet when the message is good.** It only prompts on a `vague`,
   `incomplete`, or `wrong` verdict.
+- **Chunks large diffs.** A diff that fits the model's budget is reviewed in one
+  call. A larger one is split into parts, each summarized separately, then judged
+  as a whole from those summaries — so no file is dropped. Very large diffs are
+  capped at a fixed number of parts (the rest is covered by the file map).
 - **Skips non-interactive contexts.** No terminal, or `CI` set → does nothing.
 - **Skips merge / squash / amend** commits.
 - **Bypass** any time with `GIT_CRUX_SKIP=1` or `git commit --no-verify`.
@@ -164,8 +168,8 @@ tuned against a small scenario set, not a broad benchmark, so expect rough edges
 on unusual diffs.
 
 Obvious next steps: a curated evaluation set to measure precision/recall before
-prompt changes, and large-diff chunking. (Global install via `core.hooksPath` is
-done — see `git crux init --global`.)
+prompt changes. (Global install via `core.hooksPath` and large-diff chunking are
+both done.)
 
 ## Build from source
 
