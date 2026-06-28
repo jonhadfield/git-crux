@@ -1,0 +1,14 @@
+diff --git a/client.go b/client.go
+index 1111111..2222222 100644
+--- a/client.go
++++ b/client.go
+@@ -1,8 +1,9 @@
+ package fetch
+
+ import (
+ 	"net/http"
++	"time"
+ )
+
+-var client = &http.Client{}
++var client = &http.Client{Timeout: 5 * time.Second}

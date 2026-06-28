@@ -1,0 +1,20 @@
+diff --git a/users.go b/users.go
+index 9999999..aaaaaaa 100644
+--- a/users.go
++++ b/users.go
+@@ -1,9 +1,17 @@
+ package users
+
++var cache = map[int]*User{}
++
+ func Get(id int) (*User, error) {
++	if u, ok := cache[id]; ok {
++		return u, nil
++	}
+ 	u, err := db.Query(id)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	cache[id] = u
+ 	return u, nil
+ }

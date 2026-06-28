@@ -1,0 +1,5 @@
+{
+  "verdict": "incomplete",
+  "style": "plain",
+  "notes": "Message covers the debounce but not the unrelated API v1 to v2 bump."
+}

@@ -1,0 +1,12 @@
+diff --git a/parse.go b/parse.go
+index eeeeeee..fffffff 100644
+--- a/parse.go
++++ b/parse.go
+@@ -5,6 +5,9 @@ package api
+
+ func parse(resp *Response) (string, error) {
++	if resp == nil {
++		return "", errors.New("nil response")
++	}
+ 	return resp.Body, nil
+ }

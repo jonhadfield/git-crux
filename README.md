@@ -168,15 +168,32 @@ are requested at `temperature 0` for determinism. This is an MVP: the prompt is
 tuned against a small scenario set, not a broad benchmark, so expect rough edges
 on unusual diffs.
 
-Obvious next steps: a curated evaluation set to measure precision/recall before
-prompt changes. (Global install via `core.hooksPath` and large-diff chunking are
-both done.)
+## Evaluation set
+
+Because the verdict is the product of a *prompt*, changing the prompt can quietly
+regress it. A curated set of labelled cases lives in `testdata/eval/` — each is a
+commit message, a staged diff, and the expected verdict — so you can measure
+before and after a prompt change instead of eyeballing it.
+
+```sh
+make eval                              # needs model env (OPENAI_API_KEY, or GIT_CRUX_BASE_URL)
+GIT_CRUX_EVAL_MIN=0.8 make eval        # also fail if verdict accuracy drops below 80%
+```
+
+The runner prints a per-case PASS/FAIL table and a confusion matrix. The corpus
+itself is validity-checked on every `go test` run (no model needed), so a
+malformed or mislabelled case fails CI. Add a case by dropping a new directory
+into `testdata/eval/` with `message.txt`, `diff.patch`, and `want.json`.
+
+The labels encode git-crux's *intended* behaviour; a model that disagrees on a
+borderline case is exactly the signal the set exists to surface.
 
 ## Build from source
 
 ```sh
 make build     # -> ./git-crux
 make install   # go install
+make test      # go test ./...
 ```
 
 ## License

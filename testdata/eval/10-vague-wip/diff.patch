@@ -1,0 +1,17 @@
+diff --git a/retry.go b/retry.go
+index 5656565..7878787 100644
+--- a/retry.go
++++ b/retry.go
+@@ -1,7 +1,12 @@
+ package net
+
+-func send(req *Request) error {
+-	return do(req)
++func send(req *Request) error {
++	for i := 0; i < 3; i++ {
++		if err := do(req); err == nil {
++			return nil
++		}
++	}
++	return errors.New("send failed after 3 attempts")
+ }
