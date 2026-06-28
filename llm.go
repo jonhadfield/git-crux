@@ -207,14 +207,29 @@ var verdictResponseFormat = map[string]any{
 	},
 }
 
-// evaluate asks the model whether message accurately describes diff. It starts
-// from the model's estimated diff budget and, if the prompt overflows the
-// model's ACTUAL loaded context, halves the diff and retries down to a floor.
-// This discovers the real limit empirically rather than trusting a guess, which
-// matters because a model can be loaded with a smaller window than its nominal
-// maximum (e.g. phi-4 loaded at 8K instead of 16K).
+// maxChunks bounds how many parts a single review fans out into, so a pathologically
+// large diff can't trigger an unbounded number of model calls. Beyond this the tail
+// is summarized from the file map only (see evaluateChunked).
+const maxChunks = 20
+
+// evaluate asks the model whether message accurately describes diff. A diff that
+// fits the budget is reviewed in one call (evaluateWhole); a larger one is split
+// into parts, each summarized separately, and judged as a whole from those
+// summaries (evaluateChunked) so nothing is silently dropped.
 func evaluate(ctx context.Context, message, diff, model, style string) (*verdict, error) {
 	budget := diffBudget(model)
+	if len(diff) <= budget {
+		return evaluateWhole(ctx, message, diff, model, style, budget)
+	}
+	return evaluateChunked(ctx, message, diff, model, style, budget)
+}
+
+// evaluateWhole reviews a diff that fits in a single request. It starts from the
+// model's estimated budget and, if the prompt overflows the model's ACTUAL loaded
+// context, halves the diff and retries down to a floor — discovering the real
+// limit empirically, since a model can be loaded with a smaller window than its
+// nominal maximum (e.g. phi-4 loaded at 8K instead of 16K).
+func evaluateWhole(ctx context.Context, message, diff, model, style string, budget int) (*verdict, error) {
 	for {
 		v, err := evaluateWithBudget(ctx, message, diff, model, style, budget)
 		if err == nil || !isContextOverflow(err) || budget <= minDiffChars {
@@ -241,44 +256,121 @@ func isContextOverflow(err error) bool {
 		strings.Contains(s, "too many tokens")
 }
 
-// evaluateWithBudget performs one /chat/completions call, sending at most budget
-// bytes of diff.
+// evaluateWithBudget performs one verdict /chat/completions call, sending at most
+// budget bytes of diff.
 func evaluateWithBudget(ctx context.Context, message, diff, model, style string, budget int) (*verdict, error) {
-	reqBody, err := json.Marshal(map[string]any{
-		"model": model,
-		"messages": []chatMessage{
-			{Role: "system", Content: systemPrompt(style)},
-			{Role: "user", Content: userPrompt(message, diffSummary(diff), truncateDiff(diff, budget))},
-		},
-		"temperature":     0,
-		"stream":          false,
-		"response_format": verdictResponseFormat,
+	content, err := chatCompletion(ctx, model, "asking "+model, verdictResponseFormat, []chatMessage{
+		{Role: "system", Content: systemPrompt(style)},
+		{Role: "user", Content: userPrompt(message, diffSummary(diff), truncateDiff(diff, budget))},
 	})
 	if err != nil {
 		return nil, err
+	}
+	return finishVerdict(content)
+}
+
+// evaluateChunked reviews a diff too large for one request. It splits the diff
+// into parts (chunkDiff), asks the model to summarize each part, then judges the
+// developer's message against the combined summaries plus the full file map. This
+// keeps every file in view — unlike truncation, which would drop the diff's tail.
+func evaluateChunked(ctx context.Context, message, diff, model, style string, budget int) (*verdict, error) {
+	chunks := chunkDiff(diff, budget)
+	if len(chunks) > maxChunks {
+		fmt.Fprintf(os.Stderr, "git-crux: very large diff; summarizing the first %d of %d parts (tail covered by the file map)\n", maxChunks, len(chunks))
+		chunks = chunks[:maxChunks]
+	} else {
+		fmt.Fprintf(os.Stderr, "git-crux: large diff; reviewing in %d parts\n", len(chunks))
+	}
+
+	summaries := make([]string, 0, len(chunks))
+	for i, c := range chunks {
+		s, err := summarizeChunk(ctx, c, model, i+1, len(chunks), budget)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(s) != "" {
+			summaries = append(summaries, s)
+		}
+	}
+
+	content, err := chatCompletion(ctx, model, "combining summaries", verdictResponseFormat, []chatMessage{
+		{Role: "system", Content: systemPrompt(style)},
+		{Role: "user", Content: userPromptDigest(message, diffSummary(diff), strings.Join(summaries, "\n"))},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return finishVerdict(content)
+}
+
+// summarizeChunk asks the model to describe the changes in one part of a large
+// diff as terse bullet lines. If the part still overflows the model's real
+// context, it halves the part and retries down to the floor.
+func summarizeChunk(ctx context.Context, chunk, model string, part, total, budget int) (string, error) {
+	c := chunk
+	for {
+		content, err := chatCompletion(ctx, model, fmt.Sprintf("summarizing part %d/%d", part, total), nil, []chatMessage{
+			{Role: "system", Content: summarizeSystemPrompt},
+			{Role: "user", Content: fmt.Sprintf("Part %d of %d of the staged diff:\n%s", part, total, c)},
+		})
+		if err == nil {
+			return strings.TrimSpace(content), nil
+		}
+		if !isContextOverflow(err) || len(c) <= minDiffChars {
+			return "", err
+		}
+		c = truncate(c, len(c)/2)
+	}
+}
+
+// finishVerdict parses and normalizes a model's verdict reply.
+func finishVerdict(content string) (*verdict, error) {
+	v, err := parseVerdict(content)
+	if err != nil {
+		return nil, err
+	}
+	v.Verdict = strings.ToLower(strings.TrimSpace(v.Verdict))
+	v.Suggestion = strings.TrimSpace(v.Suggestion)
+	return v, nil
+}
+
+// chatCompletion performs one /chat/completions call and returns the assistant's
+// raw content. responseFormat may be nil (free-form text, used for chunk
+// summaries) or a structured-output schema (used for verdicts). It shows a
+// spinner labelled label while waiting; the spinner is a no-op off a terminal.
+func chatCompletion(ctx context.Context, model, label string, responseFormat any, messages []chatMessage) (string, error) {
+	payload := map[string]any{
+		"model":       model,
+		"messages":    messages,
+		"temperature": 0,
+		"stream":      false,
+	}
+	if responseFormat != nil {
+		payload["response_format"] = responseFormat
+	}
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
 	}
 
 	// Generous timeout: the first request may trigger a model load.
 	client := &http.Client{Timeout: 90 * time.Second}
 
-	// Show a spinner while we wait. It stops on every return path (including the
-	// context-overflow error), so the outer retry message in evaluate prints to a
-	// clean line. No-op in non-interactive contexts.
-	sp := startSpinner("asking " + model)
+	sp := startSpinner(label)
 	defer sp.Stop()
 
 	resp, err := doWithRetry(ctx, client, baseURL()+"/chat/completions", reqBody)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return "", ctx.Err()
 		}
-		return nil, fmt.Errorf("calling model server at %s (is LM Studio running?): %w", baseURL(), err)
+		return "", fmt.Errorf("calling model server at %s (is LM Studio running?): %w", baseURL(), err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("model server returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("model server returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
 	var cr struct {
@@ -289,19 +381,12 @@ func evaluateWithBudget(ctx context.Context, message, diff, model, style string,
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &cr); err != nil {
-		return nil, fmt.Errorf("decoding server response: %w", err)
+		return "", fmt.Errorf("decoding server response: %w", err)
 	}
 	if len(cr.Choices) == 0 {
-		return nil, fmt.Errorf("model returned no choices")
+		return "", fmt.Errorf("model returned no choices")
 	}
-
-	v, err := parseVerdict(cr.Choices[0].Message.Content)
-	if err != nil {
-		return nil, err
-	}
-	v.Verdict = strings.ToLower(strings.TrimSpace(v.Verdict))
-	v.Suggestion = strings.TrimSpace(v.Suggestion)
-	return v, nil
+	return cr.Choices[0].Message.Content, nil
 }
 
 // doWithRetry POSTs body to url, retrying once after a short pause on a transient
@@ -471,5 +556,25 @@ func userPrompt(message, summary, diff string) string {
 	}
 	b.WriteString("\nStaged diff:\n")
 	b.WriteString(diff)
+	return b.String()
+}
+
+// summarizeSystemPrompt instructs the model to digest one part of a large diff.
+// The output is fed back, alongside the other parts' digests, into the verdict
+// call — so it must stay grounded in what the part actually shows.
+const summarizeSystemPrompt = `You are summarizing ONE part of a larger git diff so it can be reviewed as a whole. List the concrete changes in THIS part as terse "- " bullet lines: what was added, removed, or changed, and in which files or functions. Describe ONLY what appears in this part; do not guess the overall intent or mention anything you cannot see here. Respond with ONLY the bullet lines, no preamble or commentary.`
+
+// userPromptDigest builds the reduce-step prompt: the developer's message, the
+// full file map, and the per-part summaries standing in for the (too-large) diff.
+func userPromptDigest(message, summary, digest string) string {
+	var b strings.Builder
+	b.WriteString("Commit message:\n")
+	b.WriteString(message)
+	if summary != "" {
+		b.WriteString("\n\n")
+		b.WriteString(summary)
+	}
+	b.WriteString("\n\nThe staged diff is large, so here are per-section summaries covering all of its changes:\n")
+	b.WriteString(digest)
 	return b.String()
 }

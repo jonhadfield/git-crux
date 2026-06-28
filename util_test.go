@@ -86,6 +86,61 @@ func TestTruncateDiffSmallDiffUnchanged(t *testing.T) {
 	}
 }
 
+// TestChunkDiffPacksAndKeepsEverything checks that chunking groups files under
+// the budget, drops nothing, and reconstructs the original diff when rejoined.
+func TestChunkDiffPacksAndKeepsEverything(t *testing.T) {
+	a := makeFileDiff("a.go", 60)
+	b := makeFileDiff("b.go", 60)
+	c := makeFileDiff("c.go", 60)
+	diff := a + b + c
+
+	max := len(a) + len(b) - 1 // forces at most two files per chunk
+	chunks := chunkDiff(diff, max)
+
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, ch := range chunks {
+		if len(ch) > max {
+			t.Errorf("chunk %d is %d bytes, over budget %d", i, len(ch), max)
+		}
+	}
+	if got := strings.Join(chunks, ""); got != diff {
+		t.Errorf("rejoined chunks do not equal original diff:\n%q\nvs\n%q", got, diff)
+	}
+	for _, f := range []string{"a.go", "b.go", "c.go"} {
+		if !strings.Contains(strings.Join(chunks, ""), "diff --git a/"+f) {
+			t.Errorf("file %q missing from chunks", f)
+		}
+	}
+}
+
+// TestChunkDiffSplitsOversizedFile checks that a single file larger than the
+// budget is broken into multiple pieces, each carrying its filename.
+func TestChunkDiffSplitsOversizedFile(t *testing.T) {
+	big := makeFileDiff("huge.go", 5000)
+	const max = 1500
+	chunks := chunkDiff(big, max)
+
+	if len(chunks) < 2 {
+		t.Fatalf("expected the oversized file to split into multiple chunks, got %d", len(chunks))
+	}
+	for i, ch := range chunks {
+		if !strings.Contains(ch, "huge.go") {
+			t.Errorf("piece %d lost the filename: %q", i, truncate(ch, 80))
+		}
+	}
+}
+
+// TestChunkDiffSingleFitsWhole returns the diff unsplit when it is within budget.
+func TestChunkDiffSingleFitsWhole(t *testing.T) {
+	diff := makeFileDiff("a.go", 50) + makeFileDiff("b.go", 50)
+	chunks := chunkDiff(diff, 10000)
+	if len(chunks) != 1 || chunks[0] != diff {
+		t.Errorf("expected a single chunk equal to the diff, got %d chunks", len(chunks))
+	}
+}
+
 func TestStripComments(t *testing.T) {
 	in := "Add retry logic\n\nbody line\n# Please enter the commit message for your changes.\n#\n# On branch main\n"
 	want := "Add retry logic\n\nbody line"
