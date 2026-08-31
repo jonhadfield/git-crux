@@ -42,6 +42,12 @@ With [Homebrew](https://brew.sh):
 brew install jonhadfield/tap/git-crux
 ```
 
+Or, on macOS, download the signed installer — `git-crux_<version>_macos.pkg` on
+the [latest release](https://github.com/jonhadfield/git-crux/releases/latest) —
+and open it. It puts `git-crux` in `/usr/local/bin`. The package is notarized
+with a stapled ticket, so it installs with no Gatekeeper warning; a bare binary
+from one of the tarballs is quarantined by the browser and refused instead.
+
 Or with Go 1.22 or later:
 
 ```sh
