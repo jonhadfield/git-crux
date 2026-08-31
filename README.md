@@ -1,20 +1,33 @@
 # git-crux
 
-A small Go CLI that keeps commit messages **on point**. It compares the message
-you wrote against the **actual staged diff** and, when the message is vague,
-incomplete, or wrong, suggests a sharper one — anchored on your stated intent
-rather than generating from scratch. By default suggestions follow the
-[Conventional Commits](https://www.conventionalcommits.org) standard
-(`feat:`, `fix:`, `chore:`, …); set `GIT_CRUX_STYLE=plain` for a plain imperative
-subject instead.
+[![ci](https://github.com/jonhadfield/git-crux/actions/workflows/ci.yml/badge.svg)](https://github.com/jonhadfield/git-crux/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/jonhadfield/git-crux)](https://github.com/jonhadfield/git-crux/releases/latest)
+[![licence](https://img.shields.io/github/license/jonhadfield/git-crux)](LICENSE)
 
-It talks to any **OpenAI-compatible** chat endpoint. By default it uses OpenAI's
-`gpt-4o-mini` (reading `OPENAI_API_KEY` from the environment), which produces the
-most reliable messages. To keep diffs **on your machine**, point it at a local
-server instead — [LM Studio](https://lmstudio.ai), Ollama (`:11434/v1`), or
-llama.cpp — by setting `GIT_CRUX_BASE_URL` and `GIT_CRUX_MODEL` (see
-Configuration). Note: with the OpenAI default, each reviewed diff is sent to
-OpenAI.
+**Your commit message, checked against what you actually changed.**
+
+git-crux reads the staged diff, judges the message you wrote against it, and —
+when the message is vague, incomplete, or plain wrong — suggests a sharper one.
+It sharpens *your* stated intent rather than generating from scratch, so the
+message still says what you meant.
+
+![git-crux catching a vague commit message and suggesting a specific one](docs/screenshot.png)
+
+Run it as `git crux -m "..."`, or install the hook and let plain `git commit`
+handle itself. It **never blocks a commit**: if the model is unreachable or
+confused, your commit goes through untouched.
+
+- **Conventional Commits by default** — `feat:`, `fix:`, `chore:`, … inferred
+  from the diff; `GIT_CRUX_STYLE=plain` for a plain imperative subject instead
+- **Any OpenAI-compatible endpoint** — OpenAI's `gpt-4o-mini` out of the box,
+  or keep diffs on your machine with [LM Studio](https://lmstudio.ai), Ollama
+  (`:11434/v1`), or llama.cpp via `GIT_CRUX_BASE_URL`
+- **Handles big diffs** — larger changes are split, summarized, then judged as a
+  whole, so no file is silently dropped
+- **Measured, not vibes** — a labelled evaluation set scores the prompt, so a
+  change to it can be checked instead of eyeballed
+
+Note: with the OpenAI default, each reviewed diff is sent to OpenAI.
 
 ## Why "crux"
 
@@ -23,42 +36,41 @@ did?
 
 ## Install
 
-This repository is **private**, so the Go module proxy and checksum database
-can't fetch it. Tell Go to bypass them and use your own git credentials, then
-install:
+With [Homebrew](https://brew.sh):
 
 ```sh
-export GOPRIVATE=github.com/jonhadfield/*
-# authenticate git to GitHub over SSH (one-time):
-git config --global url."git@github.com:".insteadOf "https://github.com/"
-
-go install github.com/jonhadfield/git-crux@latest   # puts `git-crux` on $PATH
+brew install jonhadfield/tap/git-crux
 ```
 
-`GOPRIVATE` skips the public proxy/sumdb for this path; the `insteadOf` rewrite
-makes Go fetch over SSH so your existing key authenticates (a personal-access
-token over HTTPS works too). Without both, the install fails with a
-`sum.golang.org … 404` or `could not read Username for https://github.com`.
-Alternatively, build from source (see below).
+Or with Go 1.22 or later:
+
+```sh
+go install github.com/jonhadfield/git-crux@latest
+```
+
+Or from a checkout:
+
+```sh
+go build -o git-crux .
+```
 
 Because git resolves `git crux` to a `git-crux` binary on `PATH`, you get the
 `git crux` subcommand for free.
 
-Then run a local model server. With LM Studio, start its server (default port
-1234) and load a model. **Model choice matters a lot** (see Status) — a 14B-class
-instruct model such as `microsoft/phi-4` is recommended.
+Then point it at a model. With `OPENAI_API_KEY` set you are already done. To
+keep diffs on your machine instead, start a local server — with LM Studio, run
+its server (default port 1234) and load a model — and set `GIT_CRUX_BASE_URL`
+(see Configuration). **Model choice matters a lot** (see Status): a 14B-class
+instruct model such as `microsoft/phi-4` is the realistic local minimum.
 
 ## Use
 
-**As an explicit command** (no setup beyond install):
+**As an explicit command** (no setup beyond install) — the screenshot above
+shows a full run:
 
 ```sh
 git add .
 git crux -m "updates my application"
-#   message:  updates my application
-#   verdict:  vague — message is generic and does not describe specific changes
-#   suggest:  feat: add retry with exponential backoff to upload function
-#   [A]ccept suggestion / [e]dit / [k]eep original?
 ```
 
 **As a hook**, so plain `git commit` is handled automatically:
