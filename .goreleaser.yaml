@@ -1,0 +1,57 @@
+version: 2
+
+project_name: git-crux
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: .
+    binary: git-crux
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+
+homebrew_casks:
+  # No suffix needed here: neither homebrew-core nor homebrew-cask owns the
+  # `git-crux` token, so the cask and the installed command share a name.
+  - name: git-crux
+    binaries: [git-crux]
+    repository:
+      owner: jonhadfield
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/jonhadfield/git-crux
+    description: AI commit-message reviewer that checks your message against the staged diff
+    hooks:
+      post:
+        # The binaries are not notarized; clear the quarantine flag so
+        # Gatekeeper does not block them.
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/git-crux"]
+          end
