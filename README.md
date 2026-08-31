@@ -129,6 +129,21 @@ erroring — so it works out of the box whether or not you have a key.
 | `GIT_CRUX_CONTEXT`   | _(auto from model)_          | Model context window in tokens; sizes the diff sent for review. |
 | `GIT_CRUX_MAX_DIFF`  | _(auto from context)_        | Hard cap on diff bytes sent; overrides the context-derived budget. |
 
+### Behind a proxy
+
+git-crux uses Go's standard proxy handling, so the usual environment variables
+work with no extra configuration:
+
+```sh
+export HTTPS_PROXY=http://proxy.example.com:3128   # used for https:// endpoints
+export HTTP_PROXY=http://proxy.example.com:3128    # used for http:// endpoints
+export NO_PROXY=api.internal.example.com           # comma-separated bypass list
+```
+
+Lowercase spellings (`https_proxy`, and so on) work too. `localhost` and
+`127.0.0.1` are always bypassed, so a local model server is reached directly
+even with a proxy set.
+
 ## Flags
 
 | Flag        | Default            | Meaning                                       |
