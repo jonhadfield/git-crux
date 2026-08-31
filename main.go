@@ -19,7 +19,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
-var version = "1.0.0"
+var version = "dev"
 
 func main() {
 	// A signal-cancellable context so Ctrl-C aborts an in-flight model call
