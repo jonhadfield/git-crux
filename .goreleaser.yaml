@@ -7,7 +7,8 @@ before:
     - go mod tidy
 
 builds:
-  - main: .
+  - id: git-crux
+    main: .
     binary: git-crux
     env:
       - CGO_ENABLED=0
@@ -18,6 +19,27 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+
+# Sign and notarize the darwin binaries so macOS Gatekeeper does not refuse a
+# tarball downloaded straight from the releases page. Uses goreleaser's
+# cross-platform (quill) implementation, so no macOS runner is needed. The
+# enabled guard keeps snapshot and fork builds working when the secrets are
+# absent; both the certificate and the notary key are required, since signing
+# without usable notary credentials would fail the release outright.
+notarize:
+  macos:
+    - enabled: '{{ and (isEnvSet "MACOS_SIGN_P12") (isEnvSet "MACOS_NOTARY_KEY") }}'
+      ids:
+        - git-crux
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 20m
 
 archives:
   - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
@@ -49,8 +71,10 @@ homebrew_casks:
     description: AI commit-message reviewer that checks your message against the staged diff
     hooks:
       post:
-        # The binaries are not notarized; clear the quarantine flag so
-        # Gatekeeper does not block them.
+        # The darwin binaries are signed and notarized, but a notarization
+        # ticket cannot be stapled into a bare Mach-O executable, so Gatekeeper
+        # reports "Notary Ticket Missing" and blocks first run. Casks set the
+        # quarantine flag on download, so clear it here.
         install: |
           if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/git-crux"]
