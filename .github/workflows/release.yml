@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Build with the Go the test job actually ran against, rather than
+      # whatever "stable" has moved on to since. Shipping binaries from a
+      # toolchain nothing tested is the gap this closes.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Pinned rather than "~> v2", which resolves to whatever the newest v2
+      # is at the moment a tag is pushed. A release is the worst place to
+      # find out that a tool changed: it runs once, on a tag, and the
+      # artefacts it produces are what people download.
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: v2.18.0
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}

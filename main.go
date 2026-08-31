@@ -18,7 +18,8 @@ import (
 	"syscall"
 )
 
-const version = "1.0.0"
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "1.0.0"
 
 func main() {
 	// A signal-cancellable context so Ctrl-C aborts an in-flight model call
