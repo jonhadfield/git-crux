@@ -359,3 +359,40 @@ func TestExplicitLocalURLKeepsLocalModel(t *testing.T) {
 		t.Errorf("modelName with explicit local URL = %q, want %q", got, localModel)
 	}
 }
+
+func TestConnectHint(t *testing.T) {
+	// A local endpoint means a missing local server, whatever the proxy says:
+	// localhost is bypassed by Go's proxy handling, so the proxy is irrelevant.
+	t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+	for _, url := range []string{
+		"http://localhost:1234/v1",
+		"http://127.0.0.1:1234/v1",
+		"http://[::1]:1234/v1",
+	} {
+		if got, want := connectHint(url), "is your local model server running?"; got != want {
+			t.Errorf("connectHint(%q) = %q, want %q", url, got, want)
+		}
+	}
+
+	// A hosted endpoint with a proxy configured: name the variable to check,
+	// never its value, which may carry credentials.
+	got := connectHint("https://api.openai.com/v1")
+	if want := "check your network connection and the proxy in HTTPS_PROXY"; got != want {
+		t.Errorf("proxied hosted endpoint = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "proxy.example.com") {
+		t.Errorf("hint leaks the proxy value: %q", got)
+	}
+	if strings.Contains(got, "LM Studio") {
+		t.Errorf("hosted endpoint should not mention LM Studio: %q", got)
+	}
+}
+
+func TestConnectHintNoProxy(t *testing.T) {
+	for _, name := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		t.Setenv(name, "")
+	}
+	if got, want := connectHint("https://api.openai.com/v1"), "check your network connection"; got != want {
+		t.Errorf("connectHint = %q, want %q", got, want)
+	}
+}

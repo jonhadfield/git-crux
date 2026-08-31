@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -364,7 +365,7 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		return "", fmt.Errorf("calling model server at %s (is LM Studio running?): %w", baseURL(), err)
+		return "", fmt.Errorf("calling model server at %s (%s): %w", baseURL(), connectHint(baseURL()), err)
 	}
 	defer resp.Body.Close()
 
@@ -387,6 +388,28 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 		return "", fmt.Errorf("model returned no choices")
 	}
 	return cr.Choices[0].Message.Content, nil
+}
+
+// connectHint suggests where to look when a request to the model server fails
+// to connect. The hint used to be an unconditional "is LM Studio running?",
+// which sends anyone using a hosted endpoint after the wrong cause entirely -
+// a proxy that refuses the connection reads as a missing local server.
+//
+// Proxy variables are named but never printed: a proxy URL may carry
+// credentials, and this string ends up in terminals and logs.
+func connectHint(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil {
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+			return "is your local model server running?"
+		}
+	}
+	for _, name := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		if os.Getenv(name) != "" {
+			return "check your network connection and the proxy in " + name
+		}
+	}
+	return "check your network connection"
 }
 
 // doWithRetry POSTs body to url, retrying once after a short pause on a transient
