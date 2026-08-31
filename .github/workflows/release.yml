@@ -42,3 +42,89 @@ jobs:
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+
+  # A signed, notarized and STAPLED installer. The tarballs cannot carry a
+  # notarization ticket: a ticket cannot be stapled into a bare Mach-O
+  # executable, so Gatekeeper has no offline proof and rejects a directly
+  # downloaded binary even though Apple notarized it. A .pkg can be stapled,
+  # and files it installs are never quarantined, so the installed binary runs
+  # with no Gatekeeper check at all.
+  #
+  # Needs a macOS runner: pkgbuild and stapler are macOS-only. Free for public
+  # repositories. Skips itself when the installer certificate is absent, so the
+  # rest of the release is unaffected until the secrets are set.
+  installer:
+    name: macOS installer package
+    needs: goreleaser
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Build, sign, notarize and staple the installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          MACOS_INSTALLER_P12: ${{ secrets.MACOS_INSTALLER_P12 }}
+          MACOS_INSTALLER_PASSWORD: ${{ secrets.MACOS_INSTALLER_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$MACOS_INSTALLER_P12" ] || [ -z "$MACOS_NOTARY_KEY" ]; then
+            echo "::notice::MACOS_INSTALLER_P12 or MACOS_NOTARY_KEY not set - skipping the installer package."
+            exit 0
+          fi
+
+          VERSION="${TAG#v}"
+          WORK="$RUNNER_TEMP/pkg"
+          mkdir -p "$WORK/payload/usr/local/bin"
+
+          # Reuse the binaries goreleaser already signed and notarized, rather
+          # than rebuilding unsigned ones. lipo joins them into one universal
+          # binary so a single package covers both architectures.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'git-crux_darwin_*.tar.gz' --dir "$WORK"
+          tar xzf "$WORK/git-crux_darwin_arm64.tar.gz" -C "$WORK" git-crux
+          mv "$WORK/git-crux" "$WORK/git-crux.arm64"
+          tar xzf "$WORK/git-crux_darwin_amd64.tar.gz" -C "$WORK" git-crux
+          mv "$WORK/git-crux" "$WORK/git-crux.amd64"
+          lipo -create "$WORK/git-crux.arm64" "$WORK/git-crux.amd64" -output "$WORK/payload/usr/local/bin/git-crux"
+          chmod 755 "$WORK/payload/usr/local/bin/git-crux"
+
+          # lipo strips the per-slice signatures, so re-sign the universal
+          # binary with the same Developer ID Application identity.
+          KEYCHAIN="$RUNNER_TEMP/installer.keychain-db"
+          KEYCHAIN_PASS="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+          printf %s "$MACOS_INSTALLER_P12" | base64 -d > "$WORK/installer.p12"
+          security import "$WORK/installer.p12" -k "$KEYCHAIN" -P "$MACOS_INSTALLER_PASSWORD" -T /usr/bin/pkgbuild -T /usr/bin/productbuild -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN" > /dev/null
+          rm -f "$WORK/installer.p12"
+
+          INSTALLER_ID="$(security find-identity -v -p basic "$KEYCHAIN" | grep 'Developer ID Installer' | head -1 | sed 's/.*"\(.*\)"/\1/')"
+          if [ -z "$INSTALLER_ID" ]; then
+            echo "::error::No 'Developer ID Installer' identity in MACOS_INSTALLER_P12. That is a different certificate type from 'Developer ID Application'."
+            exit 1
+          fi
+          echo "Signing with: $INSTALLER_ID"
+
+          pkgbuild --root "$WORK/payload" --install-location / --identifier uk.co.lessknown.git-crux --version "$VERSION" --sign "$INSTALLER_ID" "$WORK/git-crux.pkg"
+
+          printf %s "$MACOS_NOTARY_KEY" | base64 -d > "$WORK/notary.p8"
+          xcrun notarytool submit "$WORK/git-crux.pkg" --key "$WORK/notary.p8" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER_ID" --wait --timeout 20m
+          rm -f "$WORK/notary.p8"
+
+          xcrun stapler staple "$WORK/git-crux.pkg"
+
+          # Prove the ticket is attached and Gatekeeper accepts it. Unlike the
+          # bare binaries, this must pass offline.
+          xcrun stapler validate "$WORK/git-crux.pkg"
+          spctl -a -vvv -t install "$WORK/git-crux.pkg"
+
+          mv "$WORK/git-crux.pkg" "$WORK/git-crux_${VERSION}_macos.pkg"
+          gh release upload "$TAG" "$WORK/git-crux_${VERSION}_macos.pkg" --repo "$GITHUB_REPOSITORY" --clobber
