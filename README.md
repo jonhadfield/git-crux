@@ -128,6 +128,41 @@ erroring — so it works out of the box whether or not you have a key.
 | `GIT_CRUX_STYLE`     | `conventional`               | Message style: `conventional` (Conventional Commits) or `plain` (imperative subject). |
 | `GIT_CRUX_CONTEXT`   | _(auto from model)_          | Model context window in tokens; sizes the diff sent for review. |
 | `GIT_CRUX_MAX_DIFF`  | _(auto from context)_        | Hard cap on diff bytes sent; overrides the context-derived budget. |
+| `GIT_CRUX_REASONING_EFFORT` | _(unset)_             | Sent as `reasoning_effort` when set; omitted entirely when not. See Reasoning models. |
+
+### Reasoning models
+
+A strict `json_schema` request and a model with a thinking phase can collide,
+and the answer comes back useless in one of two ways, both seen against LM
+Studio:
+
+- **nothing at all** — `finish_reason: "stop"` with `content: ""` (a 27B qwen3)
+- **a schema-shaped shell** — `{"verdict":"incomplete","suggestion":"","reason":""}`
+  with `reasoning_tokens: 0`, the grammar having squeezed out the thinking phase
+  (deepseek-r1-distill-qwen-7b)
+
+git-crux handles both on its own: it retries once without `response_format` and
+extracts the JSON from the free-form reply, tolerating a `<think>` block,
+markdown fences and prose either side. The verdict is then validated in code,
+since the schema is no longer enforcing it.
+
+No configuration is needed, and the retry is the better answer rather than just
+a rescue: on the same prompt, the constrained call spent 32 tokens producing
+empty strings while the unconstrained one spent 251 reasoning tokens and
+returned a grounded suggestion.
+
+`GIT_CRUX_REASONING_EFFORT` is the escape hatch if you would rather suppress the
+thinking phase outright:
+
+```sh
+export GIT_CRUX_REASONING_EFFORT=none
+```
+
+The accepted levels are the server's, not git-crux's, and they vary by model —
+the value is passed through untouched. Set it only for a server that expects it:
+models without a thinking phase reject the field outright, and OpenAI's
+`gpt-4o-mini` answers `400 Unrecognized request argument supplied:
+reasoning_effort`. That is why it is omitted from the request unless you set it.
 
 ### Behind a proxy
 
