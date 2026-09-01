@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestContextTokensKnownModel(t *testing.T) {
@@ -627,5 +629,107 @@ func TestAccurateDoesNotFallBack(t *testing.T) {
 	}
 	if v.Verdict != "accurate" || n != 1 {
 		t.Errorf("verdict=%q after %d requests; want accurate after 1", v.Verdict, n)
+	}
+}
+
+// LM Studio answers an oversized prompt with HTTP 200 and an empty choices
+// array: no error text to match on, so the overflow has to be inferred from
+// the shape of the reply or the halving retry never runs.
+func TestNoChoicesCountsAsContextOverflow(t *testing.T) {
+	if !isContextOverflow(errNoChoices) {
+		t.Error("errNoChoices must be treated as a context overflow")
+	}
+	if !isContextOverflow(fmt.Errorf("wrapped: %w", errNoChoices)) {
+		t.Error("a wrapped errNoChoices must still be recognised")
+	}
+	if isContextOverflow(errors.New("connection refused")) {
+		t.Error("an unrelated error must not be treated as an overflow")
+	}
+}
+
+func TestNoChoicesSurfacesAsErrNoChoices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[]}`) // exactly what LM Studio returns
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+
+	_, err := chatCompletion(context.Background(), "m", "l", nil, nil)
+	if !errors.Is(err, errNoChoices) {
+		t.Fatalf("got %v, want errNoChoices", err)
+	}
+	if !strings.Contains(err.Error(), "context") {
+		t.Errorf("the message should point at the context window, got %q", err)
+	}
+}
+
+func TestLoadedContextTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v0/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// max_context_length is the model's theoretical maximum and must be
+		// ignored; loaded_context_length is what the server can actually take.
+		fmt.Fprint(w, `{"data":[
+			{"id":"other","state":"loaded","max_context_length":131072,"loaded_context_length":4096},
+			{"id":"m","state":"loaded","max_context_length":131072,"loaded_context_length":8192}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL+"/v1")
+
+	loadedContext = contextCache{}
+	if got := loadedContextTokens("m"); got != 8192 {
+		t.Errorf("loadedContextTokens = %d, want 8192 (not the 131072 maximum)", got)
+	}
+
+	// contextTokens must prefer the probe over the guess from the model id...
+	loadedContext = contextCache{}
+	t.Setenv("GIT_CRUX_MODEL", "m")
+	if got := contextTokens("m"); got != 8192 {
+		t.Errorf("contextTokens = %d, want the probed 8192", got)
+	}
+	// ...but an explicit override still wins over both.
+	loadedContext = contextCache{}
+	t.Setenv("GIT_CRUX_CONTEXT", "2048")
+	if got := contextTokens("m"); got != 2048 {
+		t.Errorf("contextTokens = %d, want the explicit 2048", got)
+	}
+}
+
+func TestLoadedContextTokensFallsBackQuietly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"m","state":"not-loaded","max_context_length":131072}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL+"/v1")
+
+	loadedContext = contextCache{}
+	if got := loadedContextTokens("m"); got != 0 {
+		t.Errorf("an unloaded model must probe to 0, got %d", got)
+	}
+	loadedContext = contextCache{}
+	if got := loadedContextTokens("absent"); got != 0 {
+		t.Errorf("an unknown model must probe to 0, got %d", got)
+	}
+	// The guess is then used, unchanged from before this feature existed.
+	loadedContext = contextCache{}
+	if got := contextTokens("microsoft/phi-4"); got != 16384 {
+		t.Errorf("contextTokens = %d, want the 16384 guess", got)
+	}
+}
+
+// A hosted endpoint must not be probed: /api/v0/models cannot succeed there and
+// the request would only add latency to every run.
+func TestOpenAIIsNotProbed(t *testing.T) {
+	t.Setenv("GIT_CRUX_BASE_URL", "https://api.openai.com/v1")
+	loadedContext = contextCache{}
+	start := time.Now()
+	if got := loadedContextTokens("gpt-4o-mini"); got != 0 {
+		t.Errorf("got %d, want 0", got)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Errorf("took %v; api.openai.com should be skipped without a request", elapsed)
 	}
 }

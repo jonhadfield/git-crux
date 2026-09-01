@@ -126,7 +126,7 @@ erroring — so it works out of the box whether or not you have a key.
 | `GIT_CRUX_API_KEY`   | _(falls back to `OPENAI_API_KEY`)_ | Bearer token for hosted APIs; ignored by local servers.|
 | `GIT_CRUX_SKIP`      | _(unset)_                    | Set to any value to disable evaluation.   |
 | `GIT_CRUX_STYLE`     | `conventional`               | Message style: `conventional` (Conventional Commits) or `plain` (imperative subject). |
-| `GIT_CRUX_CONTEXT`   | _(auto from model)_          | Model context window in tokens; sizes the diff sent for review. |
+| `GIT_CRUX_CONTEXT`   | _(detected, else from model)_ | Model context window in tokens; sizes the diff sent for review. Rarely needed — see Context detection. |
 | `GIT_CRUX_MAX_DIFF`  | _(auto from context)_        | Hard cap on diff bytes sent; overrides the context-derived budget. |
 | `GIT_CRUX_REASONING_EFFORT` | _(unset)_             | Sent as `reasoning_effort` when set; omitted entirely when not. See Reasoning models. |
 
@@ -150,6 +150,23 @@ No configuration is needed, and the retry is the better answer rather than just
 a rescue: on the same prompt, the constrained call spent 32 tokens producing
 empty strings while the unconstrained one spent 251 reasoning tokens and
 returned a grounded suggestion.
+
+### Context detection
+
+A model is routinely loaded with a smaller window than its family's maximum —
+LM Studio will happily serve `deepseek-r1-distill-qwen-7b` at 8192 tokens when
+the model supports 131072. Sizing the diff from the larger number means every
+request overflows.
+
+git-crux asks the server first. LM Studio reports the real figure through its
+native `/api/v0/models` as `loaded_context_length`, which is queried once per
+run and used when available; otherwise the window is inferred from the model id
+as before. `GIT_CRUX_CONTEXT` still overrides both.
+
+This matters because an overflow is not always reported as one. LM Studio
+answers an oversized prompt with HTTP 200 and an **empty `choices` array** — no
+error text, no usage — so git-crux treats that shape as an overflow and retries
+with a smaller diff, rather than reporting a dead end.
 
 `GIT_CRUX_REASONING_EFFORT` is the escape hatch if you would rather suppress the
 thinking phase outright:

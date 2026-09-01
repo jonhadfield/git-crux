@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -65,10 +67,75 @@ var knownContext = []struct {
 	{"gpt-3.5", 16385},
 }
 
+// contextCache holds the server probe result: one lookup per run, whatever the
+// outcome. A named type so tests can reset it between cases.
+type contextCache struct {
+	once   sync.Once
+	tokens int
+}
+
+var loadedContext contextCache
+
+// loadedContextTokens asks an LM Studio server what window the model is actually
+// loaded with, via its native /api/v0/models. Returns 0 when that is unavailable
+// or the model is not loaded, leaving the caller to fall back to guessing.
+//
+// It reads loaded_context_length, NOT max_context_length: the latter is the
+// model's theoretical maximum (131072 for deepseek-r1-7b) and using it would be
+// far worse than the static guess it replaces.
+//
+// The OpenAI-compatible /v1/models carries no context information at all, so
+// there is nothing vendor-neutral to use here. api.openai.com is skipped so a
+// hosted run never pays for a request that cannot succeed.
+func loadedContextTokens(model string) int {
+	loadedContext.once.Do(func() {
+		u, err := url.Parse(baseURL())
+		if err != nil || strings.EqualFold(u.Hostname(), "api.openai.com") {
+			return
+		}
+		u.Path, u.RawQuery = "/api/v0/models", ""
+
+		// Short timeout: this is an optimisation, never a dependency.
+		client := &http.Client{Timeout: 2 * time.Second}
+		resp, err := client.Get(u.String())
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return
+		}
+		var mr struct {
+			Data []struct {
+				ID     string `json:"id"`
+				State  string `json:"state"`
+				Loaded int    `json:"loaded_context_length"`
+			} `json:"data"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&mr) != nil {
+			return
+		}
+		for _, m := range mr.Data {
+			if m.ID == model && m.State == "loaded" && m.Loaded > 0 {
+				loadedContext.tokens = m.Loaded
+				return
+			}
+		}
+	})
+	return loadedContext.tokens
+}
+
 // contextTokens returns the context window (in tokens) for model: an explicit
 // GIT_CRUX_CONTEXT wins, then the knownContext table, then the default.
 func contextTokens(model string) int {
 	if n, ok := envInt("GIT_CRUX_CONTEXT"); ok {
+		return n
+	}
+	// Ask the server before guessing from the model id. A model is routinely
+	// loaded with a smaller window than its family's maximum - deepseek-r1-7b
+	// at 8192 where the qwen entry below claims 32768 - and guessing high means
+	// every request overflows.
+	if n := loadedContextTokens(model); n > 0 {
 		return n
 	}
 	m := strings.ToLower(model)
@@ -245,9 +312,19 @@ func evaluateWhole(ctx context.Context, message, diff, model, style string, budg
 	}
 }
 
+// errNoChoices is returned when the server answers with an empty choices array.
+// LM Studio does this when the prompt does not fit the model's LOADED context:
+// HTTP 200, no error text, no usage, just nothing. The cause has to be inferred
+// from the shape of the reply because the server never states it.
+var errNoChoices = errors.New("model returned no choices (the prompt may exceed the model's context window)")
+
 // isContextOverflow reports whether err is the model server rejecting the prompt
 // for exceeding its context window, as opposed to any other failure.
 func isContextOverflow(err error) bool {
+	// Checked before the string match: this one carries no message to match on.
+	if errors.Is(err, errNoChoices) {
+		return true
+	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "context length") ||
 		strings.Contains(s, "context window") ||
@@ -519,7 +596,7 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 		return "", fmt.Errorf("decoding server response: %w", err)
 	}
 	if len(cr.Choices) == 0 {
-		return "", fmt.Errorf("model returned no choices")
+		return "", errNoChoices
 	}
 	return cr.Choices[0].Message.Content, nil
 }
