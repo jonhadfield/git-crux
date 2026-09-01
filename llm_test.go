@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -394,5 +396,167 @@ func TestConnectHintNoProxy(t *testing.T) {
 	}
 	if got, want := connectHint("https://api.openai.com/v1"), "check your network connection"; got != want {
 		t.Errorf("connectHint = %q, want %q", got, want)
+	}
+}
+
+func TestStripThinkBlocks(t *testing.T) {
+	cases := map[string]string{
+		"<think>weighing it up</think>{\"verdict\":\"vague\"}": "{\"verdict\":\"vague\"}",
+		"a<think>one</think>b<think>two</think>c":              "abc",
+		"no thinking here": "no thinking here",
+		// Unterminated: the reply was cut off mid-thought, so drop the tail.
+		"before<think>never closed": "before",
+	}
+	for in, want := range cases {
+		if got := stripThinkBlocks(in); got != want {
+			t.Errorf("stripThinkBlocks(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestExtractJSONObject(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"bare", `{"a":1}`, `{"a":1}`},
+		{"fenced", "```json\n{\"a\":1}\n```", `{"a":1}`},
+		{"prose either side", `Here you go: {"a":1} hope that helps`, `{"a":1}`},
+		{"after think block", "<think>hmm {not json}</think>\n{\"a\":1}", `{"a":1}`},
+		{"nested", `{"a":{"b":2}}`, `{"a":{"b":2}}`},
+		// A brace inside a string must not end the object, and a trailing "}"
+		// in prose must not extend it - the old first-{ to last-} span did both.
+		{"brace in string", `{"suggestion":"fix: handle } in input"} then prose}`, `{"suggestion":"fix: handle } in input"}`},
+		{"escaped quote", `{"reason":"says \"done\" but isn't"}`, `{"reason":"says \"done\" but isn't"}`},
+	}
+	for _, c := range cases {
+		got, ok := extractJSONObject(c.in)
+		if !ok || got != c.want {
+			t.Errorf("%s: extractJSONObject(%q) = %q, %v; want %q, true", c.name, c.in, got, ok, c.want)
+		}
+	}
+	if _, ok := extractJSONObject("no object here"); ok {
+		t.Error("expected no object")
+	}
+	if _, ok := extractJSONObject(`{"unclosed": 1`); ok {
+		t.Error("unbalanced object should not parse")
+	}
+}
+
+func TestParseVerdictEmptyContentExplainsItself(t *testing.T) {
+	_, err := parseVerdict("   ")
+	if err == nil {
+		t.Fatal("expected an error for empty content")
+	}
+	for _, want := range []string{"empty content", "json_schema", "GIT_CRUX_REASONING_EFFORT"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestValidateVerdict(t *testing.T) {
+	for _, ok := range []string{"accurate", "vague", "incomplete", "wrong"} {
+		if err := validateVerdict(&verdict{Verdict: ok}); err != nil {
+			t.Errorf("validateVerdict(%q) = %v, want nil", ok, err)
+		}
+	}
+	if err := validateVerdict(&verdict{Verdict: "probably fine"}); err == nil {
+		t.Error("expected an error for an invented verdict")
+	}
+}
+
+func TestReasoningEffortOnlyWhenSet(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		bodies = append(bodies, body)
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"verdict\":\"accurate\",\"suggestion\":\"\",\"reason\":\"ok\"}"}}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+	if _, err := verdictCall(context.Background(), "m", "l", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := bodies[0]["reasoning_effort"]; present {
+		t.Error("reasoning_effort must be omitted when the env var is unset")
+	}
+
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "none")
+	if _, err := verdictCall(context.Background(), "m", "l", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := bodies[1]["reasoning_effort"]; got != "none" {
+		t.Errorf("reasoning_effort = %v, want \"none\"", got)
+	}
+}
+
+// The bug this fixes: a strict json_schema request answered with empty content.
+func TestEmptyContentFallsBackExactlyOnce(t *testing.T) {
+	var calls []bool // whether each request carried response_format
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		_, structured := body["response_format"]
+		calls = append(calls, structured)
+		if structured {
+			fmt.Fprint(w, `{"choices":[{"message":{"content":""}}]}`) // the observed failure
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"<think>pondering</think>\n`+"```"+`json\n{\"verdict\":\"vague\",\"suggestion\":\"feat: add x\",\"reason\":\"generic\"}\n`+"```"+`"}}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+
+	v, err := verdictCall(context.Background(), "m", "l", nil)
+	if err != nil {
+		t.Fatalf("expected the fallback to recover, got %v", err)
+	}
+	if v.Verdict != "vague" || v.Suggestion != "feat: add x" {
+		t.Errorf("got %+v", v)
+	}
+	if len(calls) != 2 || !calls[0] || calls[1] {
+		t.Errorf("want exactly 2 calls (structured, then unconstrained), got %v", calls)
+	}
+}
+
+func TestEmptyContentRetriedOnlyOnce(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		fmt.Fprint(w, `{"choices":[{"message":{"content":""}}]}`) // empty both times
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+
+	if _, err := verdictCall(context.Background(), "m", "l", nil); err == nil {
+		t.Fatal("expected an error when both attempts come back empty")
+	}
+	if n != 2 {
+		t.Errorf("made %d requests, want exactly 2", n)
+	}
+}
+
+// A transport-level failure must not trigger the fallback: the retry is for
+// empty content only, and genuine errors still fail open in the caller.
+func TestHTTPErrorDoesNotFallBack(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "boom")
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+
+	if _, err := verdictCall(context.Background(), "m", "l", nil); err == nil {
+		t.Fatal("expected the server error to surface")
+	}
+	if n != 1 {
+		t.Errorf("made %d requests, want 1 (no fallback on HTTP errors)", n)
 	}
 }

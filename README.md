@@ -128,6 +128,34 @@ erroring — so it works out of the box whether or not you have a key.
 | `GIT_CRUX_STYLE`     | `conventional`               | Message style: `conventional` (Conventional Commits) or `plain` (imperative subject). |
 | `GIT_CRUX_CONTEXT`   | _(auto from model)_          | Model context window in tokens; sizes the diff sent for review. |
 | `GIT_CRUX_MAX_DIFF`  | _(auto from context)_        | Hard cap on diff bytes sent; overrides the context-derived budget. |
+| `GIT_CRUX_REASONING_EFFORT` | _(unset)_             | Sent as `reasoning_effort` when set; omitted entirely when not. See Reasoning models. |
+
+### Reasoning models
+
+Some local servers answer a strict `json_schema` request with **empty content**
+when the model has a thinking phase — the structured-output grammar and the
+reasoning tokens collide, and the reply comes back `finish_reason: "stop"` with
+nothing in it. Seen with LM Studio 0.4.23 serving a 27B reasoning model.
+
+git-crux handles this on its own: on empty content it retries once without
+`response_format` and extracts the JSON from the free-form reply, tolerating a
+`<think>` block, markdown fences and prose either side. The verdict is then
+validated in code, since the schema is no longer enforcing it. No configuration
+is needed, and the unconstrained request tends to produce better suggestions
+because the model gets to think.
+
+`GIT_CRUX_REASONING_EFFORT` is the escape hatch if you would rather suppress the
+thinking phase outright:
+
+```sh
+export GIT_CRUX_REASONING_EFFORT=none
+```
+
+The accepted levels are the server's, not git-crux's, and they vary by model —
+the value is passed through untouched. Set it only for a server that expects it:
+models without a thinking phase reject the field outright, and OpenAI's
+`gpt-4o-mini` answers `400 Unrecognized request argument supplied:
+reasoning_effort`. That is why it is omitted from the request unless you set it.
 
 ### Behind a proxy
 
