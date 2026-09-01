@@ -260,14 +260,10 @@ func isContextOverflow(err error) bool {
 // evaluateWithBudget performs one verdict /chat/completions call, sending at most
 // budget bytes of diff.
 func evaluateWithBudget(ctx context.Context, message, diff, model, style string, budget int) (*verdict, error) {
-	content, err := chatCompletion(ctx, model, "asking "+model, verdictResponseFormat, []chatMessage{
+	return verdictCall(ctx, model, "asking "+model, []chatMessage{
 		{Role: "system", Content: systemPrompt(style)},
 		{Role: "user", Content: userPrompt(message, diffSummary(diff), truncateDiff(diff, budget))},
 	})
-	if err != nil {
-		return nil, err
-	}
-	return finishVerdict(content)
 }
 
 // evaluateChunked reviews a diff too large for one request. It splits the diff
@@ -294,14 +290,10 @@ func evaluateChunked(ctx context.Context, message, diff, model, style string, bu
 		}
 	}
 
-	content, err := chatCompletion(ctx, model, "combining summaries", verdictResponseFormat, []chatMessage{
+	return verdictCall(ctx, model, "combining summaries", []chatMessage{
 		{Role: "system", Content: systemPrompt(style)},
 		{Role: "user", Content: userPromptDigest(message, diffSummary(diff), strings.Join(summaries, "\n"))},
 	})
-	if err != nil {
-		return nil, err
-	}
-	return finishVerdict(content)
 }
 
 // summarizeChunk asks the model to describe the changes in one part of a large
@@ -335,6 +327,143 @@ func finishVerdict(content string) (*verdict, error) {
 	return v, nil
 }
 
+// reasoningEffort returns GIT_CRUX_REASONING_EFFORT, or "" when unset. Passed
+// through untouched as reasoning_effort: the accepted levels are the server's
+// business, not ours, and they differ between models.
+func reasoningEffort() string {
+	return strings.TrimSpace(os.Getenv("GIT_CRUX_REASONING_EFFORT"))
+}
+
+// stripThinkBlocks removes the <think>...</think> sections a reasoning model
+// emits before its answer. An unterminated block means the reply was cut off
+// mid-thought, so everything from it onward is dropped.
+func stripThinkBlocks(s string) string {
+	const open, close = "<think>", "</think>"
+	for {
+		start := strings.Index(s, open)
+		if start < 0 {
+			return s
+		}
+		rest := s[start+len(open):]
+		end := strings.Index(rest, close)
+		if end < 0 {
+			return s[:start]
+		}
+		s = s[:start] + rest[end+len(close):]
+	}
+}
+
+// extractJSONObject returns the first balanced JSON object in s. It tracks string
+// literals and escapes, so a brace inside a suggestion does not end the object,
+// and it ignores any thinking block. Scanning for balance rather than taking the
+// span from the first "{" to the last "}" matters once a model is free to write
+// prose either side of its answer.
+func extractJSONObject(s string) (string, bool) {
+	s = stripThinkBlocks(s)
+	depth, start := 0, -1
+	inString, escaped := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 {
+					return s[start : i+1], true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// validateVerdict enforces what the strict schema would have. The fallback path
+// drops response_format, so this is the only thing standing between a model
+// inventing a verdict value and the rest of the program mishandling it.
+func validateVerdict(v *verdict) error {
+	switch v.Verdict {
+	case "accurate", "vague", "incomplete", "wrong":
+		return nil
+	}
+	return fmt.Errorf("model returned an unknown verdict %q", truncate(v.Verdict, 40))
+}
+
+// usableVerdict reports whether a verdict gives git-crux anything to act on. A
+// non-accurate verdict with no suggestion is inert: refine returns the original
+// message and the user is never prompted, so the review may as well not have run.
+func usableVerdict(v *verdict) bool {
+	return v.Verdict == "accurate" || strings.TrimSpace(v.Suggestion) != ""
+}
+
+// verdictCall performs one verdict request and parses the reply.
+//
+// A strict json_schema request and a model with a thinking phase can collide,
+// and the answer comes back useless in one of two ways. Both were observed
+// against LM Studio:
+//
+//   - nothing at all: finish_reason "stop" with content "" (a 27B qwen3)
+//   - a schema-shaped shell: {"verdict":"incomplete","suggestion":"","reason":""}
+//     with reasoning_tokens 0, the grammar having squeezed out the thinking
+//     phase entirely (deepseek-r1-distill-qwen-7b)
+//
+// Either way we retry ONCE without response_format and pull the JSON out of the
+// free-form reply. The same prompt unconstrained produces a real answer - 251
+// reasoning tokens and a grounded suggestion, where the constrained call spent
+// 32 tokens on empty strings - so the retry is also the better answer, not just
+// a rescue. It is validated in code because the schema no longer constrains it.
+//
+// The retry fires only on those two shapes. Transport and HTTP errors, and
+// output that is merely unparseable, return untouched: the caller still fails
+// open on them, which is deliberate.
+func verdictCall(ctx context.Context, model, label string, messages []chatMessage) (*verdict, error) {
+	content, err := chatCompletion(ctx, model, label, verdictResponseFormat, messages)
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(content) != "" {
+		v, err := finishVerdict(content)
+		if err != nil {
+			return nil, err
+		}
+		if usableVerdict(v) {
+			return v, nil
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "git-crux: the strict JSON schema produced no usable answer; retrying without it")
+	content, err = chatCompletion(ctx, model, label+" (unconstrained)", nil, messages)
+	if err != nil {
+		return nil, err
+	}
+	v, err := finishVerdict(content)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateVerdict(v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
 // chatCompletion performs one /chat/completions call and returns the assistant's
 // raw content. responseFormat may be nil (free-form text, used for chunk
 // summaries) or a structured-output schema (used for verdicts). It shows a
@@ -348,6 +477,11 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 	}
 	if responseFormat != nil {
 		payload["response_format"] = responseFormat
+	}
+	// Only sent when explicitly configured, so servers that reject an unknown
+	// field (and OpenAI models that have no reasoning phase) are unaffected.
+	if e := reasoningEffort(); e != "" {
+		payload["reasoning_effort"] = e
 	}
 	reqBody, err := json.Marshal(payload)
 	if err != nil {
@@ -451,15 +585,19 @@ func doWithRetry(ctx context.Context, client *http.Client, url string, body []by
 // JSON object in surrounding prose or markdown fences.
 func parseVerdict(content string) (*verdict, error) {
 	content = strings.TrimSpace(content)
+	if content == "" {
+		// Bare %q of an empty string told the user nothing and cost real
+		// debugging time, so name the likely cause and the way out.
+		return nil, fmt.Errorf("model returned empty content: the server may not support strict json_schema with this model " +
+			"(common with reasoning models); set GIT_CRUX_REASONING_EFFORT to disable the thinking phase")
+	}
 	var v verdict
 	if err := json.Unmarshal([]byte(content), &v); err == nil {
 		return &v, nil
 	}
-	if start := strings.IndexByte(content, '{'); start >= 0 {
-		if end := strings.LastIndexByte(content, '}'); end > start {
-			if err := json.Unmarshal([]byte(content[start:end+1]), &v); err == nil {
-				return &v, nil
-			}
+	if obj, ok := extractJSONObject(content); ok {
+		if err := json.Unmarshal([]byte(obj), &v); err == nil {
+			return &v, nil
 		}
 	}
 	return nil, fmt.Errorf("could not parse model output as JSON: %q", truncate(content, 200))

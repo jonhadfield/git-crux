@@ -79,6 +79,10 @@ Commit flags:
 Environment:
   GIT_CRUX_SKIP=1        Disable evaluation for a single command or in the hook.
   GIT_CRUX_STYLE=plain   Use the plain imperative style instead of Conventional Commits.
+  GIT_CRUX_REASONING_EFFORT=none
+                         Pass reasoning_effort to the server. Useful when a local
+                         reasoning model returns empty content under the strict
+                         JSON schema.
 `)
 }
 
