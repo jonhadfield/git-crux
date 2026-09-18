@@ -14,8 +14,10 @@ message still says what you meant.
 ![git-crux catching a vague commit message and suggesting a specific one](docs/screenshot.png)
 
 Run it as `git crux -m "..."`, or install the hook and let plain `git commit`
-handle itself. It **never blocks a commit**: if the model is unreachable or
-confused, your commit goes through untouched.
+handle itself. On review paths it **fails open**: if the model is unreachable or
+confused, your commit goes through with the original message. When generating
+interactively and the model is down, you are asked to write your own message or
+abort.
 
 - **Conventional Commits by default** — `feat:`, `fix:`, `chore:`, … inferred
   from the diff; `GIT_CRUX_STYLE=plain` for a plain imperative subject instead
@@ -229,9 +231,12 @@ Type selection is left to the model from the diff; there's no flag to pin a type
 
 ## Behaviour & guardrails
 
-- **Fails open.** If the model server is unreachable, errors, or returns
-  unparseable output, the commit proceeds untouched. git-crux never blocks a
-  commit.
+- **Fails open on review.** If the model server is unreachable, errors, or
+  returns unparseable output while reviewing an existing message, the commit
+  proceeds with the original (non-interactively always; interactively you can
+  choose to abort instead).
+- **Generation fallback.** Bare `git crux` with no AI: interactively you can
+  write your own message or abort; non-interactively the command errors out.
 - **Quiet when the message is good.** It only prompts on a `vague`,
   `incomplete`, or `wrong` verdict.
 - **Chunks large diffs.** A diff that fits the model's budget is reviewed in one

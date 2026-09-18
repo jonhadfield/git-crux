@@ -51,7 +51,10 @@ func runCommit(ctx context.Context, args []string) error {
 
 	final := *msg
 	if !*noAI && os.Getenv("GIT_CRUX_SKIP") == "" {
-		final = refine(ctx, *msg, diff, *model, style)
+		final, err = refine(ctx, *msg, diff, *model, style)
+		if err != nil {
+			return err
+		}
 	}
 
 	return commit(final)
@@ -60,14 +63,16 @@ func runCommit(ctx context.Context, args []string) error {
 // generateAndCommit has the model write a commit message for the staged diff
 // (with no seed message), lets an interactive user accept or edit it, then
 // commits. Non-interactively it commits the generated message as-is.
+// When the model is unreachable interactively, the user can write their own
+// message or abort; non-interactively the error is returned.
 func generateAndCommit(ctx context.Context, diff, model, style string) error {
 	v, err := evaluate(ctx, "", diff, model, style)
 	if err != nil {
-		return fmt.Errorf("generating commit message: %w", err)
+		return fallbackGenerate(fmt.Errorf("generating commit message: %w", err))
 	}
 	message := strings.TrimSpace(v.Suggestion)
 	if message == "" {
-		return fmt.Errorf("the model did not return a commit message")
+		return fallbackGenerate(fmt.Errorf("the model did not return a commit message"))
 	}
 	if isInteractive() {
 		message = confirmGenerated(message)
@@ -78,19 +83,39 @@ func generateAndCommit(ctx context.Context, diff, model, style string) error {
 	return commit(message)
 }
 
+// fallbackGenerate offers an interactive stop-or-write-your-own path when
+// generation fails; otherwise returns err unchanged.
+func fallbackGenerate(err error) error {
+	if !isInteractive() {
+		return err
+	}
+	message := promptOwnMessage(err)
+	if strings.TrimSpace(message) == "" {
+		return fmt.Errorf("commit aborted")
+	}
+	return commit(message)
+}
+
 // refine evaluates the message and, if it is off-point, prompts the user.
-// It always FAILS OPEN: any error returns the original message unchanged.
-func refine(ctx context.Context, original, diff, model, style string) string {
+// On AI failure: interactively offers continue-with-original or abort;
+// non-interactively fails open and returns the original unchanged.
+func refine(ctx context.Context, original, diff, model, style string) (string, error) {
 	v, err := evaluate(ctx, original, diff, model, style)
 	if err != nil {
+		if isInteractive() {
+			if !promptContinueOrAbort(err) {
+				return "", fmt.Errorf("commit aborted")
+			}
+			return original, nil
+		}
 		fmt.Fprintln(os.Stderr, "git-crux:", err, "(committing as-is; set GIT_CRUX_SKIP=1 to skip checks)")
-		return original
+		return original, nil
 	}
 	if v.Verdict == "accurate" || strings.TrimSpace(v.Suggestion) == "" {
-		return original
+		return original, nil
 	}
 	if !isInteractive() {
-		return original
+		return original, nil
 	}
-	return promptUser(original, v)
+	return promptUser(original, v), nil
 }

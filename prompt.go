@@ -22,6 +22,65 @@ func isInteractive() bool {
 	return true
 }
 
+// fallbackChoice is the user's decision when the AI path is unavailable.
+type fallbackChoice int
+
+const (
+	fallbackContinue fallbackChoice = iota
+	fallbackAbort
+)
+
+// parseFallbackChoice maps a raw tty reply to continue (default) or abort.
+func parseFallbackChoice(s string) fallbackChoice {
+	switch strings.TrimSpace(strings.ToLower(s)) {
+	case "", "c":
+		return fallbackContinue
+	default:
+		return fallbackAbort
+	}
+}
+
+// promptOwnMessage tells the user the AI path failed and offers to write their
+// own message or abort. Returns the message, or "" to abort. Non-tty falls
+// through as abort so callers can surface the original error.
+func promptOwnMessage(reason error) string {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return ""
+	}
+	defer tty.Close()
+
+	fmt.Fprintf(tty, "\n  git-crux: %v\n", reason)
+	fmt.Fprint(tty, "  AI unavailable. [C]ontinue with your own message / [a]bort? ")
+
+	reader := bufio.NewReader(tty)
+	choice, _ := reader.ReadString('\n')
+	if parseFallbackChoice(choice) == fallbackAbort {
+		return ""
+	}
+	fmt.Fprint(tty, "  commit message: ")
+	msg, _ := reader.ReadString('\n')
+	return strings.TrimSpace(msg)
+}
+
+// promptContinueOrAbort asks whether to proceed with the original message after
+// an AI failure. Returns true to continue, false to abort. Non-tty continues
+// (fail open) so scripts are never blocked.
+func promptContinueOrAbort(reason error) bool {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return true
+	}
+	defer tty.Close()
+
+	fmt.Fprintf(tty, "\n  git-crux: %v\n", reason)
+	fmt.Fprint(tty, "  AI unavailable. [C]ontinue with original / [a]bort? ")
+
+	reader := bufio.NewReader(tty)
+	choice, _ := reader.ReadString('\n')
+	return parseFallbackChoice(choice) == fallbackContinue
+}
+
 // confirmGenerated shows a freshly generated commit message and lets the user
 // accept it, replace it with their own line, or cancel. Returns the chosen
 // message, or "" to abort the commit. Reads from /dev/tty like promptUser.
