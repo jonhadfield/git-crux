@@ -379,12 +379,14 @@ func evaluateChunked(ctx context.Context, message, diff, model, style string, bu
 func summarizeChunk(ctx context.Context, chunk, model string, part, total, budget int) (string, error) {
 	c := chunk
 	for {
-		content, err := chatCompletion(ctx, model, fmt.Sprintf("summarizing part %d/%d", part, total), nil, []chatMessage{
+		reply, err := chatCompletion(ctx, model, fmt.Sprintf("summarizing part %d/%d", part, total), nil, []chatMessage{
 			{Role: "system", Content: summarizeSystemPrompt},
 			{Role: "user", Content: fmt.Sprintf("Part %d of %d of the staged diff:\n%s", part, total, c)},
 		})
 		if err == nil {
-			return strings.TrimSpace(content), nil
+			// Content only: a summary taken from the reasoning channel would
+			// be the model thinking aloud, not bullet lines.
+			return strings.TrimSpace(reply.Content), nil
 		}
 		if !isContextOverflow(err) || len(c) <= minDiffChars {
 			return "", err
@@ -501,7 +503,11 @@ func usableVerdict(v *verdict) bool {
 //     with reasoning_tokens 0, the grammar having squeezed out the thinking
 //     phase entirely (deepseek-r1-distill-qwen-7b)
 //
-// Either way we retry ONCE without response_format and pull the JSON out of the
+// A third shape looks like the first but is not: content "" with the answer
+// sitting in reasoning_content instead (LM Studio, qwen3.8-27b, where the whole
+// reply was treated as thinking). That is read before any retry, see verdictText.
+//
+// Otherwise we retry ONCE without response_format and pull the JSON out of the
 // free-form reply. The same prompt unconstrained produces a real answer - 251
 // reasoning tokens and a grounded suggestion, where the constrained call spent
 // 32 tokens on empty strings - so the retry is also the better answer, not just
@@ -511,12 +517,12 @@ func usableVerdict(v *verdict) bool {
 // output that is merely unparseable, return untouched: the caller still fails
 // open on them, which is deliberate.
 func verdictCall(ctx context.Context, model, label string, messages []chatMessage) (*verdict, error) {
-	content, err := chatCompletion(ctx, model, label, verdictResponseFormat, messages)
+	reply, err := chatCompletion(ctx, model, label, verdictResponseFormat, messages)
 	if err != nil {
 		return nil, err
 	}
 
-	if strings.TrimSpace(content) != "" {
+	if content := reply.verdictText(); strings.TrimSpace(content) != "" {
 		v, err := finishVerdict(content)
 		if err != nil {
 			return nil, err
@@ -527,11 +533,11 @@ func verdictCall(ctx context.Context, model, label string, messages []chatMessag
 	}
 
 	fmt.Fprintln(os.Stderr, "git-crux: the strict JSON schema produced no usable answer; retrying without it")
-	content, err = chatCompletion(ctx, model, label+" (unconstrained)", nil, messages)
+	reply, err = chatCompletion(ctx, model, label+" (unconstrained)", nil, messages)
 	if err != nil {
 		return nil, err
 	}
-	v, err := finishVerdict(content)
+	v, err := finishVerdict(reply.verdictText())
 	if err != nil {
 		return nil, err
 	}
@@ -541,11 +547,31 @@ func verdictCall(ctx context.Context, model, label string, messages []chatMessag
 	return v, nil
 }
 
+// chatReply is the assistant message from one completion. Reasoning holds the
+// separate thinking channel some servers return beside content: LM Studio and
+// DeepSeek name it reasoning_content, vLLM and OpenRouter name it reasoning.
+type chatReply struct {
+	Content   string
+	Reasoning string
+}
+
+// verdictText returns the text to parse a verdict from: the content, or the
+// reasoning when the content is empty. A reasoning model sometimes files its
+// entire reply as thinking and leaves content blank, strict schema and all.
+// Reasoning is otherwise free prose, which is fine here because parseVerdict
+// digs the JSON object out of prose and the caller validates what it finds.
+func (r chatReply) verdictText() string {
+	if strings.TrimSpace(r.Content) != "" {
+		return r.Content
+	}
+	return r.Reasoning
+}
+
 // chatCompletion performs one /chat/completions call and returns the assistant's
-// raw content. responseFormat may be nil (free-form text, used for chunk
+// raw reply. responseFormat may be nil (free-form text, used for chunk
 // summaries) or a structured-output schema (used for verdicts). It shows a
 // spinner labelled label while waiting; the spinner is a no-op off a terminal.
-func chatCompletion(ctx context.Context, model, label string, responseFormat any, messages []chatMessage) (string, error) {
+func chatCompletion(ctx context.Context, model, label string, responseFormat any, messages []chatMessage) (chatReply, error) {
 	payload := map[string]any{
 		"model":       model,
 		"messages":    messages,
@@ -562,7 +588,7 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 	}
 	reqBody, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
+		return chatReply{}, err
 	}
 
 	// Generous timeout: the first request may trigger a model load.
@@ -574,31 +600,38 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 	resp, err := doWithRetry(ctx, client, baseURL()+"/chat/completions", reqBody)
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return chatReply{}, ctx.Err()
 		}
-		return "", fmt.Errorf("calling model server at %s (%s): %w", baseURL(), connectHint(baseURL()), err)
+		return chatReply{}, fmt.Errorf("calling model server at %s (%s): %w", baseURL(), connectHint(baseURL()), err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("model server returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return chatReply{}, fmt.Errorf("model server returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
 	var cr struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &cr); err != nil {
-		return "", fmt.Errorf("decoding server response: %w", err)
+		return chatReply{}, fmt.Errorf("decoding server response: %w", err)
 	}
 	if len(cr.Choices) == 0 {
-		return "", errNoChoices
+		return chatReply{}, errNoChoices
 	}
-	return cr.Choices[0].Message.Content, nil
+	m := cr.Choices[0].Message
+	reasoning := m.ReasoningContent
+	if reasoning == "" {
+		reasoning = m.Reasoning
+	}
+	return chatReply{Content: m.Content, Reasoning: reasoning}, nil
 }
 
 // connectHint suggests where to look when a request to the model server fails

@@ -733,3 +733,84 @@ func TestOpenAIIsNotProbed(t *testing.T) {
 		t.Errorf("took %v; api.openai.com should be skipped without a request", elapsed)
 	}
 }
+
+// Observed against LM Studio with qwen3.8-27b: content "" and the complete,
+// schema-shaped answer filed under reasoning_content. It should be read on the
+// first call, with no unconstrained retry.
+func TestVerdictReadFromReasoningContent(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"{\"reason\": \"missing type prefix for build change\", \"suggestion\": \"build: update gateway to v1.1.39\", \"verdict\": \"vague\"}","tool_calls":[]},"finish_reason":"stop"}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+
+	v, err := verdictCall(context.Background(), "m", "l", nil)
+	if err != nil {
+		t.Fatalf("expected the verdict from reasoning_content, got %v", err)
+	}
+	if v.Verdict != "vague" || v.Suggestion != "build: update gateway to v1.1.39" {
+		t.Errorf("got %+v", v)
+	}
+	if n != 1 {
+		t.Errorf("want 1 call, got %d", n)
+	}
+}
+
+// Servers that name the field "reasoning" (vLLM, OpenRouter) are read the same way.
+func TestVerdictReadFromReasoningField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"","reasoning":"The message is fine. {\"verdict\":\"accurate\",\"suggestion\":\"\",\"reason\":\"ok\"}"}}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+
+	v, err := verdictCall(context.Background(), "m", "l", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Verdict != "accurate" {
+		t.Errorf("got %+v", v)
+	}
+}
+
+// Content wins when both are present: the reasoning is only the model's
+// working, and may contain draft JSON it later rejected.
+func TestContentPreferredOverReasoning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"verdict\":\"accurate\",\"suggestion\":\"\",\"reason\":\"ok\"}","reasoning_content":"{\"verdict\":\"wrong\",\"suggestion\":\"draft\",\"reason\":\"first thought\"}"}}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+
+	v, err := verdictCall(context.Background(), "m", "l", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Verdict != "accurate" {
+		t.Errorf("got %+v, want the content's verdict", v)
+	}
+}
+
+// Chunk summaries must not fall back to reasoning: it would put the model's
+// thinking into the digest the final verdict is judged against.
+func TestSummaryIgnoresReasoning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"","reasoning_content":"Let me look at this diff..."}}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+
+	got, err := summarizeChunk(context.Background(), "diff", "m", 1, 1, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("summary = %q, want empty", got)
+	}
+}
