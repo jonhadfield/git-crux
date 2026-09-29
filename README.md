@@ -130,6 +130,7 @@ erroring — so it works out of the box whether or not you have a key.
 | `GIT_CRUX_STYLE`     | `conventional`               | Message style: `conventional` (Conventional Commits) or `plain` (imperative subject). |
 | `GIT_CRUX_CONTEXT`   | _(detected, else from model)_ | Model context window in tokens; sizes the diff sent for review. Rarely needed — see Context detection. |
 | `GIT_CRUX_MAX_DIFF`  | _(auto from context)_        | Hard cap on diff bytes sent; overrides the context-derived budget. |
+| `GIT_CRUX_TIMEOUT`   | `90`                         | Seconds to wait for each model reply. Raise it for a large local model that answers slowly; a timeout is not retried. |
 | `GIT_CRUX_REASONING_EFFORT` | _(unset)_             | Sent as `reasoning_effort` when set; omitted entirely when not. See Reasoning models. |
 
 ### Reasoning models
@@ -147,6 +148,11 @@ git-crux handles both on its own: it retries once without `response_format` and
 extracts the JSON from the free-form reply, tolerating a `<think>` block,
 markdown fences and prose either side. The verdict is then validated in code,
 since the schema is no longer enforcing it.
+
+A third shape looks like the first but is not: `content: ""` with the whole
+answer filed under `reasoning_content` (qwen3.8-27b), or `reasoning` on vLLM and
+OpenRouter. git-crux reads the verdict from there before retrying, and only when
+`content` is empty.
 
 No configuration is needed, and the retry is the better answer rather than just
 a rescue: on the same prompt, the constrained call spent 32 tokens producing

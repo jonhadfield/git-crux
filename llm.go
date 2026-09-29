@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -176,6 +177,27 @@ func envInt(name string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// defaultTimeout bounds one model request. Generous, because the first request
+// may trigger a model load.
+const defaultTimeout = 90 * time.Second
+
+// modelTimeout returns GIT_CRUX_TIMEOUT (whole seconds), or defaultTimeout when
+// it is unset or not a positive integer. A large local model on a machine short
+// of memory can need several minutes per reply.
+func modelTimeout() time.Duration {
+	if n, ok := envInt("GIT_CRUX_TIMEOUT"); ok {
+		return time.Duration(n) * time.Second
+	}
+	return defaultTimeout
+}
+
+// isTimeout reports whether err is a timeout, including http.Client.Timeout
+// expiring while awaiting headers.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // verdict is the structured judgement returned by the model.
@@ -591,8 +613,7 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 		return chatReply{}, err
 	}
 
-	// Generous timeout: the first request may trigger a model load.
-	client := &http.Client{Timeout: 90 * time.Second}
+	client := &http.Client{Timeout: modelTimeout()}
 
 	sp := startSpinner(label)
 	defer sp.Stop()
@@ -601,6 +622,12 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 	if err != nil {
 		if ctx.Err() != nil {
 			return chatReply{}, ctx.Err()
+		}
+		if isTimeout(err) {
+			// The server is there, just slow: "is it running?" would send the
+			// user after the wrong cause.
+			return chatReply{}, fmt.Errorf("model server at %s gave no reply within %s: the model may be loading, "+
+				"or too slow on this machine; raise GIT_CRUX_TIMEOUT (seconds) to wait longer", baseURL(), modelTimeout())
 		}
 		return chatReply{}, fmt.Errorf("calling model server at %s (%s): %w", baseURL(), connectHint(baseURL()), err)
 	}
@@ -657,10 +684,17 @@ func connectHint(rawURL string) string {
 }
 
 // doWithRetry POSTs body to url, retrying once after a short pause on a transient
-// network error (connection refused/reset, dial timeout). It does NOT retry once
-// the server has answered — a non-2xx status comes back to the caller on the
-// first try — nor when ctx is cancelled, so Ctrl-C aborts immediately. A fresh
-// request is built per attempt because the body reader is consumed each time.
+// network error (connection refused/reset). It does NOT retry once the server
+// has answered — a non-2xx status comes back to the caller on the first try —
+// nor when ctx is cancelled, so Ctrl-C aborts immediately.
+//
+// Nor does it retry a timeout. By then the whole budget is spent, usually on a
+// server that accepted the request and is still generating: a retry doubled the
+// wait (two 90s timeouts, three minutes, against a swapping 27B model) and
+// queued a second generation behind the first, whose answer nobody would read.
+//
+// A fresh request is built per attempt because the body reader is consumed
+// each time.
 func doWithRetry(ctx context.Context, client *http.Client, url string, body []byte) (*http.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -683,7 +717,7 @@ func doWithRetry(ctx context.Context, client *http.Client, url string, body []by
 		if err == nil {
 			return resp, nil
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || isTimeout(err) {
 			return nil, err // cancelled or timed out: do not retry
 		}
 		lastErr = err
