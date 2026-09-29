@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -814,3 +817,81 @@ func TestSummaryIgnoresReasoning(t *testing.T) {
 		t.Errorf("summary = %q, want empty", got)
 	}
 }
+
+func TestModelTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want time.Duration
+	}{
+		{"", defaultTimeout},
+		{"300", 300 * time.Second},
+		{" 45 ", 45 * time.Second},
+		{"0", defaultTimeout},
+		{"-5", defaultTimeout},
+		{"2m", defaultTimeout}, // whole seconds only; a typo must not disable the limit
+	} {
+		t.Setenv("GIT_CRUX_TIMEOUT", tc.env)
+		if got := modelTimeout(); got != tc.want {
+			t.Errorf("GIT_CRUX_TIMEOUT=%q: got %s, want %s", tc.env, got, tc.want)
+		}
+	}
+}
+
+// A timeout used to be retried like a refused connection, doubling the wait and
+// leaving the server generating a second answer nobody would read.
+func TestTimeoutIsNotRetried(t *testing.T) {
+	var hits atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		select { // a server still generating when the client gives up
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+	t.Setenv("GIT_CRUX_TIMEOUT", "1")
+
+	_, err := chatCompletion(context.Background(), "m", "l", nil, nil)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("server saw %d requests, want 1", n)
+	}
+	// Name the knob, and do not suggest the server is down: it answered the
+	// connection, it just had not replied yet.
+	for _, want := range []string{"no reply within 1s", "GIT_CRUX_TIMEOUT"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "running?") {
+		t.Errorf("error %q should not ask whether the server is running", err)
+	}
+}
+
+// A refused connection is still retried once: that is the transient case the
+// retry exists for.
+func TestRefusedConnectionIsRetried(t *testing.T) {
+	var attempts int
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	})}
+
+	_, err := doWithRetry(context.Background(), client, "http://localhost:1234/v1/chat/completions", nil)
+	if err == nil {
+		t.Fatal("expected a connection error")
+	}
+	if attempts != 2 {
+		t.Errorf("got %d attempts, want 2", attempts)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
