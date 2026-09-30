@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -115,7 +116,23 @@ func refine(ctx context.Context, original, diff, model, style string) (string, e
 		return original, nil
 	}
 	if !isInteractive() {
+		noteUnusedSuggestion(os.Stderr, v)
 		return original, nil
 	}
 	return promptUser(original, v), nil
+}
+
+// noteUnusedSuggestion reports a verdict that nobody could be asked about. With
+// no terminal the original message stands, which is right, but doing it
+// silently threw away a review that could take minutes on a local model, and a
+// `git crux -m` run from a script looked as though the message had passed.
+func noteUnusedSuggestion(w io.Writer, v *verdict) {
+	fmt.Fprintf(w, "git-crux: message looks %s", v.Verdict)
+	if r := strings.TrimSpace(v.Reason); r != "" {
+		fmt.Fprintf(w, " (%s)", r)
+	}
+	fmt.Fprintln(w, "; no terminal to ask on, so committing as-is. Suggested:")
+	for _, line := range strings.Split(v.Suggestion, "\n") {
+		fmt.Fprintln(w, strings.TrimRight("    "+line, " "))
+	}
 }
