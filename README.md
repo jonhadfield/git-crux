@@ -244,7 +244,9 @@ Type selection is left to the model from the diff; there's no flag to pin a type
 - **Generation fallback.** Bare `git crux` with no AI: interactively you can
   write your own message or abort; non-interactively the command errors out.
 - **Quiet when the message is good.** It only prompts on a `vague`,
-  `incomplete`, or `wrong` verdict.
+  `incomplete`, or `wrong` verdict. Run `git crux -m` without a terminal and
+  there is nobody to prompt: the original message is committed, and the verdict
+  and suggestion are printed to stderr instead.
 - **Chunks large diffs.** A diff that fits the model's budget is reviewed in one
   call. A larger one is split into parts, each summarized separately, then judged
   as a whole from those summaries — so no file is dropped. Very large diffs are
