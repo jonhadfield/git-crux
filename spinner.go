@@ -26,7 +26,12 @@ type spinner struct {
 // contexts, CI, or a hook without a tty), so callers can unconditionally
 // `defer sp.Stop()`. The first frame is delayed by one tick, so a fast response
 // completes before anything is drawn.
-func startSpinner(label string) *spinner {
+//
+// The line also shows the time spent so far against limit, the request's
+// timeout (omitted when limit is 0). A slow local model can take minutes per
+// reply, and a spinner that looks the same at second 5 and minute 5 reads as
+// hung; the count shows it is still within its budget.
+func startSpinner(label string, limit time.Duration) *spinner {
 	if !isInteractive() {
 		return nil
 	}
@@ -39,15 +44,16 @@ func startSpinner(label string) *spinner {
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
-	go s.run(label)
+	go s.run(label, limit)
 	return s
 }
 
-func (s *spinner) run(label string) {
+func (s *spinner) run(label string, limit time.Duration) {
 	defer close(s.done)
 	fmt.Fprint(s.tty, "\033[?25l")       // hide cursor
 	defer fmt.Fprint(s.tty, "\033[?25h") // restore cursor
 
+	start := time.Now()
 	ticker := time.NewTicker(80 * time.Millisecond)
 	defer ticker.Stop()
 	for i := 0; ; i++ {
@@ -55,8 +61,38 @@ func (s *spinner) run(label string) {
 		case <-s.stop:
 			return
 		case <-ticker.C:
-			fmt.Fprintf(s.tty, "\r%s %s", spinnerFrames[i%len(spinnerFrames)], label)
+			// \033[K clears whatever a longer previous frame left behind.
+			fmt.Fprintf(s.tty, "\r%s %s  %s\033[K", spinnerFrames[i%len(spinnerFrames)], label, progress(time.Since(start), limit))
 		}
+	}
+}
+
+// progress renders elapsed against limit, e.g. "2m14s / 10m", or elapsed alone
+// when there is no limit.
+func progress(elapsed, limit time.Duration) string {
+	if limit <= 0 {
+		return shortDuration(elapsed)
+	}
+	return shortDuration(elapsed) + " / " + shortDuration(limit)
+}
+
+// shortDuration formats d in whole seconds the way a person would write it:
+// "7s", "2m14s", "10m", "1h5m". time.Duration's own String gives "10m0s" and,
+// before truncation, sub-second noise like "2m14.38s".
+func shortDuration(d time.Duration) string {
+	d = d.Truncate(time.Second)
+	h, m, sec := int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%dh%dm", h, m)
+	case h > 0:
+		return fmt.Sprintf("%dh", h)
+	case m > 0 && sec > 0:
+		return fmt.Sprintf("%dm%02ds", m, sec)
+	case m > 0:
+		return fmt.Sprintf("%dm", m)
+	default:
+		return fmt.Sprintf("%ds", sec)
 	}
 }
 

@@ -615,7 +615,7 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 
 	client := &http.Client{Timeout: modelTimeout()}
 
-	sp := startSpinner(label)
+	sp := startSpinner(label, client.Timeout)
 	defer sp.Stop()
 
 	resp, err := doWithRetry(ctx, client, baseURL()+"/chat/completions", reqBody)
