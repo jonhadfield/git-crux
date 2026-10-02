@@ -75,7 +75,8 @@ Then point it at a model. With `OPENAI_API_KEY` set you are already done. To
 keep diffs on your machine instead, start a local server — with LM Studio, run
 its server (default port 1234) and load a model — and set `GIT_CRUX_BASE_URL`
 (see Configuration). **Model choice matters a lot** (see Status): a 14B-class
-instruct model such as `microsoft/phi-4` is the realistic local minimum.
+instruct model such as `microsoft/phi-4` is the realistic local minimum, and the
+model has to fit in your machine's free memory (see Choosing a local model).
 
 ## Use
 
@@ -132,6 +133,41 @@ erroring — so it works out of the box whether or not you have a key.
 | `GIT_CRUX_MAX_DIFF`  | _(auto from context)_        | Hard cap on diff bytes sent; overrides the context-derived budget. |
 | `GIT_CRUX_TIMEOUT`   | `90`                         | Seconds to wait for each model reply. Raise it for a large local model that answers slowly; a timeout is not retried. |
 | `GIT_CRUX_REASONING_EFFORT` | _(unset)_             | Sent as `reasoning_effort` when set; omitted entirely when not. See Reasoning models. |
+
+### Choosing a local model
+
+A local model is a trade between the quality of the verdict and how long you
+wait for it, and on a laptop the wait is set mostly by memory.
+
+**Fit the model in free memory, not total RAM.** LM Studio shows each model's
+loaded size. If that size, plus everything else you have open, is more than the
+machine has free, the operating system pages the model to disk and each reply
+slows from seconds to minutes. LM Studio's resource guardrail refusing to load a
+model is a sign you are at that limit.
+
+One measured example: `qwen/qwen3.8-27b` (16 GB loaded) on a 32 GB Mac with swap
+almost full. It judged all 10 cases in the evaluation set correctly, with a
+suggestion every time one was expected, at about 75 seconds per case. A
+two-line commit on the same machine took between 2 and 5 minutes across four
+runs, one of which exceeded a 5-minute timeout. Good answers, but slow ones, and
+the time varies from run to run.
+
+**Raise the timeout for a large model.** The default `GIT_CRUX_TIMEOUT` of 90
+seconds suits hosted APIs, which answer in seconds. For a large local model set
+it higher, for example:
+
+```sh
+export GIT_CRUX_TIMEOUT=600
+```
+
+While git-crux waits, the spinner shows the time spent against this limit
+(`2m14s / 10m`). A timeout is not retried, and a review that times out commits
+your message unchanged rather than blocking you.
+
+**Measure on your own machine.** `make eval` (see Evaluation set) runs the
+labelled cases against whatever model you point it at, and reports accuracy and
+total run time. Run it with two model sizes to see the trade on your hardware
+before settling on one.
 
 ### Reasoning models
 
