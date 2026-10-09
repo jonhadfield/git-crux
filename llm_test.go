@@ -343,16 +343,30 @@ func TestDefaultProfileWithKey(t *testing.T) {
 	}
 }
 
-func TestLocalFallbackWithoutKey(t *testing.T) {
+func TestDefaultProfileWithoutKey(t *testing.T) {
+	// OpenAI remains the default even with no key; the request path then fails
+	// with a clear missing-key error instead of assuming a local server.
 	t.Setenv("GIT_CRUX_BASE_URL", "")
 	t.Setenv("GIT_CRUX_MODEL", "")
 	t.Setenv("GIT_CRUX_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
-	if got := baseURL(); got != localBaseURL {
-		t.Errorf("baseURL without key = %q, want local %q", got, localBaseURL)
+	if got := baseURL(); got != defaultBaseURL {
+		t.Errorf("baseURL without key = %q, want %q", got, defaultBaseURL)
 	}
-	if got := modelName(); got != localModel {
-		t.Errorf("modelName without key = %q, want local %q", got, localModel)
+	if got := modelName(); got != defaultModel {
+		t.Errorf("modelName without key = %q, want %q", got, defaultModel)
+	}
+	if err := missingAPIKeyError(); err == nil {
+		t.Fatal("expected missingAPIKeyError when OpenAI is default and no key is set")
+	}
+}
+
+func TestMissingAPIKeySkippedForLocal(t *testing.T) {
+	t.Setenv("GIT_CRUX_BASE_URL", localBaseURL)
+	t.Setenv("GIT_CRUX_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	if err := missingAPIKeyError(); err != nil {
+		t.Errorf("local base URL should not require a key, got %v", err)
 	}
 }
 

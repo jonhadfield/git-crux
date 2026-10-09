@@ -26,8 +26,8 @@ const (
 	defaultBaseURL = "https://api.openai.com/v1"
 	defaultModel   = "gpt-4o-mini"
 
-	// Local fallback profile. When no API key is available, the OpenAI default
-	// would only 401, so we fall back to a local LM Studio server instead.
+	// Suggested local profile when GIT_CRUX_BASE_URL points away from OpenAI and
+	// GIT_CRUX_MODEL is unset. Local is opt-in; there is no automatic fallback.
 	localBaseURL = "http://localhost:1234/v1"
 	localModel   = "microsoft/phi-4"
 
@@ -214,9 +214,6 @@ func baseURL() string {
 	if v := os.Getenv("GIT_CRUX_BASE_URL"); v != "" {
 		return strings.TrimRight(v, "/")
 	}
-	if apiKey() == "" {
-		return localBaseURL // no key → the OpenAI default would only 401
-	}
 	return defaultBaseURL
 }
 
@@ -229,6 +226,20 @@ func modelName() string {
 		return defaultModel
 	}
 	return localModel
+}
+
+// missingAPIKeyError returns a clear setup error when the default OpenAI
+// endpoint would only 401. Local and other custom base URLs often ignore the
+// key, so they are left alone.
+func missingAPIKeyError() error {
+	if apiKey() != "" {
+		return nil
+	}
+	u, err := url.Parse(baseURL())
+	if err != nil || !strings.EqualFold(u.Hostname(), "api.openai.com") {
+		return nil
+	}
+	return fmt.Errorf("no API key set: export OPENAI_API_KEY (or GIT_CRUX_API_KEY), or set GIT_CRUX_BASE_URL to a local server (e.g. %s)", localBaseURL)
 }
 
 // Commit-message styles. conventional is the default: git-crux follows the
@@ -594,6 +605,9 @@ func (r chatReply) verdictText() string {
 // summaries) or a structured-output schema (used for verdicts). It shows a
 // spinner labelled label while waiting; the spinner is a no-op off a terminal.
 func chatCompletion(ctx context.Context, model, label string, responseFormat any, messages []chatMessage) (chatReply, error) {
+	if err := missingAPIKeyError(); err != nil {
+		return chatReply{}, err
+	}
 	payload := map[string]any{
 		"model":       model,
 		"messages":    messages,

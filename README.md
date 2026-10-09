@@ -117,15 +117,16 @@ git crux -m "fix stuff" -dry-run
 
 ## Configuration
 
-All optional; the defaults target OpenAI's `gpt-4o-mini`. **If no API key is
-found** (neither `GIT_CRUX_API_KEY` nor `OPENAI_API_KEY`), git-crux falls back to
-a local server (`http://localhost:1234/v1`, model `microsoft/phi-4`) instead of
-erroring — so it works out of the box whether or not you have a key.
+All optional; the defaults target OpenAI's `gpt-4o-mini`. Set `OPENAI_API_KEY`
+(or `GIT_CRUX_API_KEY`) and you are done. Local use is opt-in: point
+`GIT_CRUX_BASE_URL` at a local OpenAI-compatible server (and usually
+`GIT_CRUX_MODEL` at a model it serves). Without a key against the OpenAI
+default, git-crux errors with a short setup hint rather than guessing local.
 
 | Env var              | Default                      | Meaning                                   |
 | -------------------- | ---------------------------- | ----------------------------------------- |
 | `GIT_CRUX_BASE_URL`  | `https://api.openai.com/v1`  | OpenAI-compatible base URL. Set to e.g. `http://localhost:1234/v1` to run local. |
-| `GIT_CRUX_MODEL`     | `gpt-4o-mini`                | Model id to request.                      |
+| `GIT_CRUX_MODEL`     | `gpt-4o-mini`                | Model id to request. When `GIT_CRUX_BASE_URL` is non-OpenAI and this is unset, defaults to `microsoft/phi-4`. |
 | `GIT_CRUX_API_KEY`   | _(falls back to `OPENAI_API_KEY`)_ | Bearer token for hosted APIs; ignored by local servers.|
 | `GIT_CRUX_SKIP`      | _(unset)_                    | Set to any value to disable evaluation.   |
 | `GIT_CRUX_STYLE`     | `conventional`               | Message style: `conventional` (Conventional Commits) or `plain` (imperative subject). |
