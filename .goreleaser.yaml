@@ -68,7 +68,7 @@ homebrew_casks:
       name: homebrew-tap
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/jonhadfield/git-crux
-    description: AI commit-message reviewer that checks your message against the staged diff
+    description: AI commit-message reviewer; on-device with Apple fm on macOS 27, or OpenAI / a local model
     # The darwin binaries are signed and notarized, but a notarization
     # ticket cannot be stapled into a bare Mach-O executable, so Gatekeeper
     # reports "Notary Ticket Missing" and blocks first run. Casks set the

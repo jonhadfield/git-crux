@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -271,6 +272,24 @@ const (
 	defaultStyle      = styleConventional
 )
 
+var conventionalTypes = []string{
+	"feat", "fix", "perf", "refactor", "docs", "test", "build", "ci", "style", "chore", "revert",
+}
+
+// hasConventionalPrefix reports whether msg starts with "<type>:" or
+// "<type>(scope):" (optionally "!") for one of the Conventional Commits types.
+func hasConventionalPrefix(msg string) bool {
+	head, _, found := strings.Cut(msg, ":")
+	if !found {
+		return false
+	}
+	head = strings.TrimSuffix(head, "!")
+	if typeName, _, scoped := strings.Cut(head, "("); scoped {
+		head = typeName
+	}
+	return slices.Contains(conventionalTypes, head)
+}
+
 // commitStyle resolves the active style: an explicit value (from the -style
 // flag) wins, then GIT_CRUX_STYLE, then the default. An unrecognised value falls
 // back to the default with a warning so a typo never silently changes behavior.
@@ -307,25 +326,33 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// verdictResponseFormat pins the model output to our schema. This is the
+// verdictResponseFormatFor pins the model output to our schema. This is the
 // OpenAI/LM Studio structured-outputs format; the enum guarantees a valid
 // verdict value so we never have to defend against typos like "Vague.".
-var verdictResponseFormat = map[string]any{
-	"type": "json_schema",
-	"json_schema": map[string]any{
-		"name":   "verdict",
-		"strict": true,
-		"schema": map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"properties": map[string]any{
-				"verdict":    map[string]any{"type": "string", "enum": []string{"accurate", "vague", "incomplete", "wrong"}},
-				"suggestion": map[string]any{"type": "string", "description": "Complete commit message: a subject line, then (for non-trivial changes) a blank line and a '- ' bulleted body. Empty string when the verdict is accurate."},
-				"reason":     map[string]any{"type": "string"},
+// Apple fm weights the property description more than the system prompt, so
+// Conventional Commits requires the type prefix here, not only in prose.
+func verdictResponseFormatFor(style string) map[string]any {
+	sugg := "Complete commit message: a subject line, then (for non-trivial changes) a blank line and a '- ' bulleted body. Empty string when the verdict is accurate."
+	if style != stylePlain {
+		sugg = "Complete Conventional Commits message. The first line MUST begin with a type prefix (feat:, fix:, chore:, ci:, docs:, …) then an imperative description. For non-trivial changes, a blank line and '- ' bullets follow. Empty string when the verdict is accurate."
+	}
+	return map[string]any{
+		"type": "json_schema",
+		"json_schema": map[string]any{
+			"name":   "verdict",
+			"strict": true,
+			"schema": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"verdict":    map[string]any{"type": "string", "enum": []string{"accurate", "vague", "incomplete", "wrong"}},
+					"suggestion": map[string]any{"type": "string", "description": sugg},
+					"reason":     map[string]any{"type": "string"},
+				},
+				"required": []string{"verdict", "suggestion", "reason"},
 			},
-			"required": []string{"verdict", "suggestion", "reason"},
 		},
-	},
+	}
 }
 
 // maxChunks bounds how many parts a single review fans out into, so a pathologically
@@ -339,10 +366,29 @@ const maxChunks = 20
 // summaries (evaluateChunked) so nothing is silently dropped.
 func evaluate(ctx context.Context, message, diff, model, style string) (*verdict, error) {
 	budget := diffBudget(model)
+	var v *verdict
+	var err error
 	if len(diff) <= budget {
-		return evaluateWhole(ctx, message, diff, model, style, budget)
+		v, err = evaluateWhole(ctx, message, diff, model, style, budget)
+	} else {
+		v, err = evaluateChunked(ctx, message, diff, model, style, budget)
 	}
-	return evaluateChunked(ctx, message, diff, model, style, budget)
+	if err != nil {
+		return v, err
+	}
+	clampEmptyMessage(message, v)
+	return v, nil
+}
+
+// clampEmptyMessage is a backstop: an empty developer message has nothing to
+// judge as accurate. Small models sometimes copy the "valid feat prefix"
+// example and mark generate-from-scratch as accurate.
+func clampEmptyMessage(message string, v *verdict) {
+	if v == nil || strings.TrimSpace(message) != "" || v.Verdict != "accurate" {
+		return
+	}
+	v.Verdict = "vague"
+	v.Reason = "no commit message was provided"
 }
 
 // evaluateWhole reviews a diff that fits in a single request. It starts from the
@@ -372,7 +418,9 @@ func evaluateWhole(ctx context.Context, message, diff, model, style string, budg
 var errNoChoices = errors.New("model returned no choices (the prompt may exceed the model's context window)")
 
 // isContextOverflow reports whether err is the model server rejecting the prompt
-// for exceeding its context window, as opposed to any other failure.
+// for exceeding its context window, as opposed to any other failure. Apple fm
+// says "the session's transcript exceeded the model's context size"; OpenAI and
+// llama.cpp use "context length" / "n_ctx" / "too many tokens".
 func isContextOverflow(err error) bool {
 	// Checked before the string match: this one carries no message to match on.
 	if errors.Is(err, errNoChoices) {
@@ -381,6 +429,8 @@ func isContextOverflow(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "context length") ||
 		strings.Contains(s, "context window") ||
+		strings.Contains(s, "context size") ||
+		strings.Contains(s, "transcript exceeded") ||
 		strings.Contains(s, "n_ctx") ||
 		strings.Contains(s, "tokens to keep") ||
 		strings.Contains(s, "maximum context") ||
@@ -390,7 +440,7 @@ func isContextOverflow(err error) bool {
 // evaluateWithBudget performs one verdict /chat/completions call, sending at most
 // budget bytes of diff.
 func evaluateWithBudget(ctx context.Context, message, diff, model, style string, budget int) (*verdict, error) {
-	return verdictCall(ctx, model, "asking "+modelLabel(model), []chatMessage{
+	return verdictCall(ctx, model, "asking "+modelLabel(model), style, []chatMessage{
 		{Role: "system", Content: systemPrompt(style)},
 		{Role: "user", Content: userPrompt(message, diffSummary(diff), truncateDiff(diff, budget))},
 	})
@@ -420,7 +470,7 @@ func evaluateChunked(ctx context.Context, message, diff, model, style string, bu
 		}
 	}
 
-	return verdictCall(ctx, model, "combining summaries", []chatMessage{
+	return verdictCall(ctx, model, "combining summaries", style, []chatMessage{
 		{Role: "system", Content: systemPrompt(style)},
 		{Role: "user", Content: userPromptDigest(message, diffSummary(diff), strings.Join(summaries, "\n"))},
 	})
@@ -541,8 +591,20 @@ func validateVerdict(v *verdict) error {
 // usableVerdict reports whether a verdict gives git-crux anything to act on. A
 // non-accurate verdict with no suggestion is inert: refine returns the original
 // message and the user is never prompted, so the review may as well not have run.
-func usableVerdict(v *verdict) bool {
-	return v.Verdict == "accurate" || strings.TrimSpace(v.Suggestion) != ""
+// A Conventional Commits suggestion with no type prefix is the same: the user
+// would be offered a message the style forbids.
+func usableVerdict(v *verdict, style string) bool {
+	if v.Verdict == "accurate" {
+		return true
+	}
+	sugg := strings.TrimSpace(v.Suggestion)
+	if sugg == "" {
+		return false
+	}
+	if style != stylePlain && !hasConventionalPrefix(sugg) {
+		return false
+	}
+	return true
 }
 
 // verdictCall performs one verdict request and parses the reply.
@@ -569,8 +631,8 @@ func usableVerdict(v *verdict) bool {
 // The retry fires only on those two shapes. Transport and HTTP errors, and
 // output that is merely unparseable, return untouched: the caller still fails
 // open on them, which is deliberate.
-func verdictCall(ctx context.Context, model, label string, messages []chatMessage) (*verdict, error) {
-	reply, err := chatCompletion(ctx, model, label, verdictResponseFormat, messages)
+func verdictCall(ctx context.Context, model, label, style string, messages []chatMessage) (*verdict, error) {
+	reply, err := chatCompletion(ctx, model, label, verdictResponseFormatFor(style), messages)
 	if err != nil {
 		return nil, err
 	}
@@ -580,7 +642,7 @@ func verdictCall(ctx context.Context, model, label string, messages []chatMessag
 		if err != nil {
 			return nil, err
 		}
-		if usableVerdict(v) {
+		if usableVerdict(v, style) {
 			return v, nil
 		}
 	}
@@ -858,7 +920,7 @@ Output rules:
   * Always begin with a valid type prefix. Add the blank line and "- " bullets ONLY when the diff touches several files or makes more than one notable change; a small single-purpose change is just the prefixed subject.
   * Order bullets by importance; use the "Files changed" map so no significant area is missed; describe behavior or areas, not bare filenames.
   * PRESERVE the developer's stated intent — their message is a seed. If their message already implies a type, honor it unless the diff contradicts it. If it frames the commit (e.g. "initial." means this IS the initial commit), keep that meaning after the prefix.
-  * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a complete Conventional Commits message for the diff from scratch.
+  * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a suggestion that starts with a type prefix (feat:, fix:, chore:, …) describing the diff.
 - "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change, mismatch, or missing/incorrect type. NEVER simply repeat the verdict word.
 `
 

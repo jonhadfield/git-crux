@@ -91,6 +91,8 @@ func TestIsContextOverflow(t *testing.T) {
 		"model server returned 400 Bad Request: context length exceeded",
 		"n_keep: 9700 >= n_ctx: 8192",
 		"prompt has too many tokens for the maximum context",
+		"The session's transcript exceeded the model's context size.",
+		"model server returned 400 Bad Request: The session's transcript exceeded the model's context size.",
 	}
 	for _, m := range overflow {
 		if !isContextOverflow(errString(m)) {
@@ -322,6 +324,9 @@ func TestSystemPromptStyle(t *testing.T) {
 	if !strings.Contains(conv, `choose "vague", not "incomplete"`) {
 		t.Error("conventional prompt should say a missing type prefix is vague, not incomplete")
 	}
+	if !strings.Contains(conv, "starts with a type prefix") {
+		t.Error("conventional prompt should require a type prefix when generating from an empty message")
+	}
 	plain := systemPrompt(stylePlain)
 	if strings.Contains(plain, "Conventional Commits") {
 		t.Error("plain prompt should not mention Conventional Commits")
@@ -499,7 +504,7 @@ func TestReasoningEffortOnlyWhenSet(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
-	if _, err := verdictCall(context.Background(), "m", "l", nil); err != nil {
+	if _, err := verdictCall(context.Background(), "m", "l", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, present := bodies[0]["reasoning_effort"]; present {
@@ -507,7 +512,7 @@ func TestReasoningEffortOnlyWhenSet(t *testing.T) {
 	}
 
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "none")
-	if _, err := verdictCall(context.Background(), "m", "l", nil); err != nil {
+	if _, err := verdictCall(context.Background(), "m", "l", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := bodies[1]["reasoning_effort"]; got != "none" {
@@ -534,7 +539,7 @@ func TestEmptyContentFallsBackExactlyOnce(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", nil)
 	if err != nil {
 		t.Fatalf("expected the fallback to recover, got %v", err)
 	}
@@ -556,7 +561,7 @@ func TestEmptyContentRetriedOnlyOnce(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	if _, err := verdictCall(context.Background(), "m", "l", nil); err == nil {
+	if _, err := verdictCall(context.Background(), "m", "l", "", nil); err == nil {
 		t.Fatal("expected an error when both attempts come back empty")
 	}
 	if n != 2 {
@@ -576,7 +581,7 @@ func TestHTTPErrorDoesNotFallBack(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
-	if _, err := verdictCall(context.Background(), "m", "l", nil); err == nil {
+	if _, err := verdictCall(context.Background(), "m", "l", "", nil); err == nil {
 		t.Fatal("expected the server error to surface")
 	}
 	if n != 1 {
@@ -586,18 +591,64 @@ func TestHTTPErrorDoesNotFallBack(t *testing.T) {
 
 func TestUsableVerdict(t *testing.T) {
 	cases := []struct {
-		v    verdict
-		want bool
+		v     verdict
+		style string
+		want  bool
 	}{
-		{verdict{Verdict: "accurate", Suggestion: ""}, true},     // legitimately has none
-		{verdict{Verdict: "vague", Suggestion: "feat: x"}, true}, // the normal case
-		{verdict{Verdict: "incomplete", Suggestion: ""}, false},  // the observed defect
-		{verdict{Verdict: "wrong", Suggestion: "   "}, false},    // whitespace is not a suggestion
+		{verdict{Verdict: "accurate", Suggestion: ""}, styleConventional, true},
+		{verdict{Verdict: "vague", Suggestion: "feat: x"}, styleConventional, true},
+		{verdict{Verdict: "vague", Suggestion: "Add a logger"}, styleConventional, false},
+		{verdict{Verdict: "vague", Suggestion: "Add a logger"}, stylePlain, true},
+		{verdict{Verdict: "incomplete", Suggestion: ""}, styleConventional, false},
+		{verdict{Verdict: "wrong", Suggestion: "   "}, styleConventional, false},
 	}
 	for _, c := range cases {
-		if got := usableVerdict(&c.v); got != c.want {
-			t.Errorf("usableVerdict(%+v) = %v, want %v", c.v, got, c.want)
+		if got := usableVerdict(&c.v, c.style); got != c.want {
+			t.Errorf("usableVerdict(%+v, %q) = %v, want %v", c.v, c.style, got, c.want)
 		}
+	}
+}
+
+func TestClampEmptyMessage(t *testing.T) {
+	v := &verdict{Verdict: "accurate", Suggestion: "feat: add a logger", Reason: "valid feat prefix matching the change"}
+	clampEmptyMessage("", v)
+	if v.Verdict != "vague" {
+		t.Errorf("empty message: verdict = %q, want vague", v.Verdict)
+	}
+	if v.Suggestion != "feat: add a logger" {
+		t.Errorf("empty message: suggestion was rewritten to %q", v.Suggestion)
+	}
+
+	kept := &verdict{Verdict: "accurate", Suggestion: "", Reason: "matches"}
+	clampEmptyMessage("feat: add a logger", kept)
+	if kept.Verdict != "accurate" {
+		t.Errorf("non-empty message: verdict = %q, want accurate", kept.Verdict)
+	}
+}
+
+func TestHasConventionalPrefix(t *testing.T) {
+	yes := []string{"feat: x", "fix(api): y", "chore!: z", "feat(api)!: w"}
+	for _, s := range yes {
+		if !hasConventionalPrefix(s) {
+			t.Errorf("%q should count as prefixed", s)
+		}
+	}
+	no := []string{"Add a logger", "feature: x", "feat", ""}
+	for _, s := range no {
+		if hasConventionalPrefix(s) {
+			t.Errorf("%q should not count as prefixed", s)
+		}
+	}
+}
+
+func TestVerdictResponseFormatFor(t *testing.T) {
+	conv := fmt.Sprint(verdictResponseFormatFor(styleConventional))
+	if !strings.Contains(conv, "type prefix") {
+		t.Error("conventional schema should require a type prefix")
+	}
+	plain := fmt.Sprint(verdictResponseFormatFor(stylePlain))
+	if strings.Contains(plain, "type prefix") {
+		t.Error("plain schema should not require a type prefix")
 	}
 }
 
@@ -621,7 +672,7 @@ func TestEmptyFieldsFallsBack(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,7 +695,7 @@ func TestAccurateDoesNotFallBack(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,7 +819,7 @@ func TestVerdictReadFromReasoningContent(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", nil)
 	if err != nil {
 		t.Fatalf("expected the verdict from reasoning_content, got %v", err)
 	}
@@ -789,7 +840,7 @@ func TestVerdictReadFromReasoningField(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +859,7 @@ func TestContentPreferredOverReasoning(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

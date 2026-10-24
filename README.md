@@ -19,12 +19,13 @@ confused, your commit goes through with the original message. When generating
 interactively and the model is down, you are asked to write your own message or
 abort.
 
+- **On-device by default on macOS 27** — Apple's `fm` CLI when it is installed,
+  licensed, and available: no API key, and the diff stays on the machine.
+  Otherwise OpenAI's `gpt-4o-mini`. Point `GIT_CRUX_BASE_URL` at
+  [LM Studio](https://lmstudio.ai), Ollama (`:11434/v1`), llama.cpp, or OpenAI
+  to keep a chosen backend instead.
 - **Conventional Commits by default** — `feat:`, `fix:`, `chore:`, … inferred
   from the diff; `GIT_CRUX_STYLE=plain` for a plain imperative subject instead
-- **On-device by default on macOS 27** — Apple's `fm` CLI when it is installed,
-  licensed, and available; otherwise OpenAI's `gpt-4o-mini`. Point
-  `GIT_CRUX_BASE_URL` at [LM Studio](https://lmstudio.ai), Ollama (`:11434/v1`),
-  llama.cpp, or OpenAI to keep a chosen backend instead.
 - **Handles big diffs** — larger changes are split, summarized, then judged as a
   whole, so no file is silently dropped
 - **Measured, not vibes** — a labelled evaluation set scores the prompt, so a
@@ -73,15 +74,12 @@ go build -o git-crux .
 Because git resolves `git crux` to a `git-crux` binary on `PATH`, you get the
 `git crux` subcommand for free.
 
-Then point it at a model. On macOS 27 with Apple Intelligence on and
-`sudo fm license` accepted, git-crux uses the on-device model and starts
-`fm serve` if needed — no API key. Otherwise set `OPENAI_API_KEY` and you
-are done. To keep diffs on your machine with a different local server, start
-it — with LM Studio, run its server (default port 1234) and load a model —
-and set `GIT_CRUX_BASE_URL` (see Configuration). **Model choice matters a lot**
-(see Status): a 14B-class instruct model such as `microsoft/phi-4` is the
-realistic minimum for a generic local server, and the model has to fit in your
-machine's free memory (see Choosing a local model).
+On macOS 27 with Apple Intelligence on and `sudo fm license` accepted, that is
+the whole setup: git-crux uses the on-device model and starts `fm serve` if
+needed. Otherwise set `OPENAI_API_KEY` and you are done. A different local
+server is opt-in — start it (LM Studio defaults to port 1234), set
+`GIT_CRUX_BASE_URL`, and pick a model that fits in free memory (see
+Configuration).
 
 ## Use
 
@@ -123,12 +121,20 @@ git crux -m "fix stuff" -dry-run
 ## Configuration
 
 All optional. On macOS 27, Apple's on-device `fm` model is the default when it
-is ready (`fm` on `PATH`, license accepted, system model available). git-crux
-starts `fm serve` on `127.0.0.1:1976` if it is not already running. An explicit
-`GIT_CRUX_BASE_URL`, or a `GIT_CRUX_MODEL` / `-model` other than `system`,
-keeps that backend instead. Otherwise the default is OpenAI's `gpt-4o-mini`:
-set `OPENAI_API_KEY` (or `GIT_CRUX_API_KEY`) and you are done. Without a key
-against that OpenAI fallback, git-crux errors with a short setup hint.
+is ready. An explicit `GIT_CRUX_BASE_URL`, or a `GIT_CRUX_MODEL` / `-model`
+other than `system`, keeps that backend instead. Otherwise the fallback is
+OpenAI's `gpt-4o-mini`: set `OPENAI_API_KEY` (or `GIT_CRUX_API_KEY`) and you
+are done. Without a key against that OpenAI fallback, git-crux errors with a
+short setup hint.
+
+### Apple fm
+
+git-crux uses `fm` when all three hold: the `fm` binary is on `PATH`,
+`fm license --status` reports the terms accepted (`sudo fm license` if not),
+and `fm available` reports the system model. It then starts `fm serve` on
+`127.0.0.1:1976` if nothing is already listening. A large diff is split and
+summarized on-device; git-crux does **not** fall over to OpenAI when the
+~8k context window is full.
 
 | Env var              | Default                      | Meaning                                   |
 | -------------------- | ---------------------------- | ----------------------------------------- |
@@ -143,6 +149,9 @@ against that OpenAI fallback, git-crux errors with a short setup hint.
 | `GIT_CRUX_REASONING_EFFORT` | _(unset)_             | Sent as `reasoning_effort` when set; omitted entirely when not. See Reasoning models. |
 
 ### Choosing a local model
+
+Apple fm is not configured here — it ships with macOS and git-crux starts it.
+This section is for a generic local server (LM Studio, Ollama, llama.cpp).
 
 A local model is a trade between the quality of the verdict and how long you
 wait for it, and on a laptop the wait is set mostly by memory.
@@ -303,10 +312,10 @@ Type selection is left to the model from the diff; there's no flag to pin a type
 
 ## Status
 
-v1.0 — works end to end against Apple fm, OpenAI, and OpenAI-compatible local servers.
-Follows Conventional Commits by default, installs globally via `core.hooksPath`,
-chunks large diffs, shows a spinner while the model runs, and cancels cleanly on
-Ctrl-C.
+v1.5 — Apple fm is the default on macOS 27 when the on-device model is ready;
+otherwise OpenAI or any OpenAI-compatible local server. Follows Conventional
+Commits by default, installs globally via `core.hooksPath`, chunks large diffs,
+shows a spinner while the model runs, and cancels cleanly on Ctrl-C.
 
 **Model quality is the gating factor**, especially for *generating* messages
 (bare `git crux` / empty `git commit`). Apple's on-device `fm` model (`system`,
@@ -326,14 +335,18 @@ commit message, a staged diff, and the expected verdict — so you can measure
 before and after a prompt change instead of eyeballing it.
 
 ```sh
-make eval                              # needs model env (OPENAI_API_KEY, or GIT_CRUX_BASE_URL)
+make eval                              # Apple fm when ready; else set OPENAI_API_KEY
 GIT_CRUX_EVAL_MIN=0.8 make eval        # also fail if verdict accuracy drops below 80%
+# OpenAI:    OPENAI_API_KEY=... make eval
+# Local:     GIT_CRUX_BASE_URL=http://localhost:1234/v1 make eval
 ```
 
-The runner prints a per-case PASS/FAIL table and a confusion matrix. The corpus
-itself is validity-checked on every `go test` run (no model needed), so a
-malformed or mislabelled case fails CI. Add a case by dropping a new directory
-into `testdata/eval/` with `message.txt`, `diff.patch`, and `want.json`.
+The runner prints a per-case PASS/FAIL table and a confusion matrix. It fails
+when a non-accurate case comes back with no suggestion, or a Conventional
+Commits case suggests a message with no type prefix. The corpus itself is
+validity-checked on every `go test` run (no model needed), so a malformed or
+mislabelled case fails CI. Add a case by dropping a new directory into
+`testdata/eval/` with `message.txt`, `diff.patch`, and `want.json`.
 
 The labels encode git-crux's *intended* behaviour; a model that disagrees on a
 borderline case is exactly the signal the set exists to surface.

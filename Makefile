@@ -16,7 +16,7 @@ test:
 	go test ./...
 
 # Score the model against the curated evaluation set in testdata/eval.
-# Requires model env (e.g. OPENAI_API_KEY, or GIT_CRUX_BASE_URL for a local server).
+# Uses Apple fm when it is ready; otherwise set OPENAI_API_KEY or GIT_CRUX_BASE_URL.
 # Set GIT_CRUX_EVAL_MIN=0.8 to fail below that verdict accuracy.
 # -timeout 0: a local model can take over a minute per case, which would trip
 # go test's default 10-minute limit. Each request is still capped by
