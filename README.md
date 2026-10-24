@@ -21,15 +21,17 @@ abort.
 
 - **Conventional Commits by default** — `feat:`, `fix:`, `chore:`, … inferred
   from the diff; `GIT_CRUX_STYLE=plain` for a plain imperative subject instead
-- **Any OpenAI-compatible endpoint** — OpenAI's `gpt-4o-mini` out of the box,
-  or keep diffs on your machine with [LM Studio](https://lmstudio.ai), Ollama
-  (`:11434/v1`), or llama.cpp via `GIT_CRUX_BASE_URL`
+- **On-device by default on macOS 27** — Apple's `fm` CLI when it is installed,
+  licensed, and available; otherwise OpenAI's `gpt-4o-mini`. Point
+  `GIT_CRUX_BASE_URL` at [LM Studio](https://lmstudio.ai), Ollama (`:11434/v1`),
+  llama.cpp, or OpenAI to keep a chosen backend instead.
 - **Handles big diffs** — larger changes are split, summarized, then judged as a
   whole, so no file is silently dropped
 - **Measured, not vibes** — a labelled evaluation set scores the prompt, so a
   change to it can be checked instead of eyeballed
 
-Note: with the OpenAI default, each reviewed diff is sent to OpenAI.
+Note: with the OpenAI fallback, each reviewed diff is sent to OpenAI. Apple fm
+and other local servers keep the diff on the machine.
 
 ## Why "crux"
 
@@ -71,12 +73,15 @@ go build -o git-crux .
 Because git resolves `git crux` to a `git-crux` binary on `PATH`, you get the
 `git crux` subcommand for free.
 
-Then point it at a model. With `OPENAI_API_KEY` set you are already done. To
-keep diffs on your machine instead, start a local server — with LM Studio, run
-its server (default port 1234) and load a model — and set `GIT_CRUX_BASE_URL`
-(see Configuration). **Model choice matters a lot** (see Status): a 14B-class
-instruct model such as `microsoft/phi-4` is the realistic local minimum, and the
-model has to fit in your machine's free memory (see Choosing a local model).
+Then point it at a model. On macOS 27 with Apple Intelligence on and
+`sudo fm license` accepted, git-crux uses the on-device model and starts
+`fm serve` if needed — no API key. Otherwise set `OPENAI_API_KEY` and you
+are done. To keep diffs on your machine with a different local server, start
+it — with LM Studio, run its server (default port 1234) and load a model —
+and set `GIT_CRUX_BASE_URL` (see Configuration). **Model choice matters a lot**
+(see Status): a 14B-class instruct model such as `microsoft/phi-4` is the
+realistic minimum for a generic local server, and the model has to fit in your
+machine's free memory (see Choosing a local model).
 
 ## Use
 
@@ -117,16 +122,18 @@ git crux -m "fix stuff" -dry-run
 
 ## Configuration
 
-All optional; the defaults target OpenAI's `gpt-4o-mini`. Set `OPENAI_API_KEY`
-(or `GIT_CRUX_API_KEY`) and you are done. Local use is opt-in: point
-`GIT_CRUX_BASE_URL` at a local OpenAI-compatible server (and usually
-`GIT_CRUX_MODEL` at a model it serves). Without a key against the OpenAI
-default, git-crux errors with a short setup hint rather than guessing local.
+All optional. On macOS 27, Apple's on-device `fm` model is the default when it
+is ready (`fm` on `PATH`, license accepted, system model available). git-crux
+starts `fm serve` on `127.0.0.1:1976` if it is not already running. An explicit
+`GIT_CRUX_BASE_URL`, or a `GIT_CRUX_MODEL` / `-model` other than `system`,
+keeps that backend instead. Otherwise the default is OpenAI's `gpt-4o-mini`:
+set `OPENAI_API_KEY` (or `GIT_CRUX_API_KEY`) and you are done. Without a key
+against that OpenAI fallback, git-crux errors with a short setup hint.
 
 | Env var              | Default                      | Meaning                                   |
 | -------------------- | ---------------------------- | ----------------------------------------- |
-| `GIT_CRUX_BASE_URL`  | `https://api.openai.com/v1`  | OpenAI-compatible base URL. Set to e.g. `http://localhost:1234/v1` to run local. |
-| `GIT_CRUX_MODEL`     | `gpt-4o-mini`                | Model id to request. When `GIT_CRUX_BASE_URL` is non-OpenAI and this is unset, defaults to `microsoft/phi-4`. |
+| `GIT_CRUX_BASE_URL`  | Apple fm (`http://127.0.0.1:1976/v1`) when available; else `https://api.openai.com/v1` | OpenAI-compatible base URL. Set to force a backend, e.g. `http://localhost:1234/v1` for LM Studio. |
+| `GIT_CRUX_MODEL`     | `system` on Apple fm; `gpt-4o-mini` on OpenAI; `microsoft/phi-4` on other local URLs | Model id to request. A non-`system` value without `GIT_CRUX_BASE_URL` keeps the OpenAI fallback. |
 | `GIT_CRUX_API_KEY`   | _(falls back to `OPENAI_API_KEY`)_ | Bearer token for hosted APIs; ignored by local servers.|
 | `GIT_CRUX_SKIP`      | _(unset)_                    | Set to any value to disable evaluation.   |
 | `GIT_CRUX_STYLE`     | `conventional`               | Message style: `conventional` (Conventional Commits) or `plain` (imperative subject). |
@@ -246,7 +253,7 @@ even with a proxy set.
 | Flag        | Default            | Meaning                                       |
 | ----------- | ------------------ | --------------------------------------------- |
 | `-m`        | —                  | Commit message. Omit to have git-crux generate one. |
-| `-model`    | _(resolved at runtime)_ | Model to use. Defaults to `GIT_CRUX_MODEL`, else the active server profile (`gpt-4o-mini` for OpenAI, `microsoft/phi-4` local). |
+| `-model`    | _(resolved at runtime)_ | Model to use. Defaults to `GIT_CRUX_MODEL`, else the active server profile (`system` for Apple fm, `gpt-4o-mini` for OpenAI, `microsoft/phi-4` other local). |
 | `-style`    | `conventional`     | Message style: `conventional` or `plain` (overrides `GIT_CRUX_STYLE`). |
 | `-no-ai`    | `false`            | Skip evaluation, commit as-is.                |
 | `-dry-run`  | `false`            | Print the verdict JSON and exit.              |
@@ -296,18 +303,20 @@ Type selection is left to the model from the diff; there's no flag to pin a type
 
 ## Status
 
-v1.0 — works end to end against OpenAI and OpenAI-compatible local servers.
+v1.0 — works end to end against Apple fm, OpenAI, and OpenAI-compatible local servers.
 Follows Conventional Commits by default, installs globally via `core.hooksPath`,
 chunks large diffs, shows a spinner while the model runs, and cancels cleanly on
 Ctrl-C.
 
 **Model quality is the gating factor**, especially for *generating* messages
-(bare `git crux` / empty `git commit`), which needs a capable model with enough
-context: `gpt-4o-mini` is reliable, while small local models (e.g. an 8K-context
-`microsoft/phi-4`) tend to parrot the prompt or truncate large diffs. Verdicts
-are requested at `temperature 0` for determinism. The prompt is tuned against the
-curated evaluation set (see above), not a broad benchmark, so expect rough edges
-on unusual diffs.
+(bare `git crux` / empty `git commit`). Apple's on-device `fm` model (`system`,
+about 8k context) is the default when it is available: it is a small utility
+model that holds up on the labelled verdict set, but it is weaker at writing a
+message from scratch than `gpt-4o-mini`. Other small local models (e.g. an
+8K-context `microsoft/phi-4`) tend to parrot the prompt or truncate large diffs.
+Verdicts are requested at `temperature 0` for determinism. The prompt is tuned
+against the curated evaluation set (see above), not a broad benchmark, so expect
+rough edges on unusual diffs.
 
 ## Evaluation set
 
