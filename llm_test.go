@@ -319,6 +319,9 @@ func TestSystemPromptStyle(t *testing.T) {
 			t.Errorf("conventional prompt missing type %q", typ)
 		}
 	}
+	if !strings.Contains(conv, `choose "vague", not "incomplete"`) {
+		t.Error("conventional prompt should say a missing type prefix is vague, not incomplete")
+	}
 	plain := systemPrompt(stylePlain)
 	if strings.Contains(plain, "Conventional Commits") {
 		t.Error("plain prompt should not mention Conventional Commits")
