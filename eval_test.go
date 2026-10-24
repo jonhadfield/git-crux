@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -74,7 +74,7 @@ func loadEvalCases(t *testing.T) []evalCase {
 			notes:   w.Notes,
 		})
 	}
-	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
+	slices.SortFunc(cases, func(a, b evalCase) int { return strings.Compare(a.name, b.name) })
 	return cases
 }
 
@@ -104,23 +104,44 @@ func TestEvalCorpusValid(t *testing.T) {
 	}
 }
 
-// hasConventionalPrefix reports whether msg starts with "<type>:" or
-// "<type>(scope):" (optionally "!") for one of the Conventional Commits types.
-func hasConventionalPrefix(msg string) bool {
-	colon := strings.IndexByte(msg, ':')
-	if colon < 0 {
-		return false
+// suggestionProblems reports generate-quality failures for one eval case: a
+// missing suggestion when the verdict is off-point, or a Conventional Commits
+// suggestion with no type prefix.
+func suggestionProblems(c evalCase, suggestion string) []string {
+	sugg := strings.TrimSpace(suggestion)
+	var problems []string
+	if c.want != "accurate" && sugg == "" {
+		problems = append(problems, "missing suggestion")
 	}
-	head := strings.TrimSuffix(msg[:colon], "!")
-	if i := strings.IndexByte(head, '('); i >= 0 {
-		head = head[:i]
+	if c.style == styleConventional && sugg != "" && !hasConventionalPrefix(sugg) {
+		problems = append(problems, "suggestion lacks Conventional Commits prefix")
 	}
-	for _, ty := range []string{"feat", "fix", "perf", "refactor", "docs", "test", "build", "ci", "style", "chore", "revert"} {
-		if head == ty {
-			return true
-		}
+	return problems
+}
+
+func TestSuggestionProblems(t *testing.T) {
+	plain := evalCase{name: "plain", want: "vague", style: stylePlain}
+	conv := evalCase{name: "conv", want: "vague", style: styleConventional}
+	ok := evalCase{name: "ok", want: "accurate", style: styleConventional}
+
+	if p := suggestionProblems(plain, ""); len(p) != 1 || p[0] != "missing suggestion" {
+		t.Errorf("empty plain generate: got %v", p)
 	}
-	return false
+	if p := suggestionProblems(plain, "Add a prefixed logger"); len(p) != 0 {
+		t.Errorf("plain suggestion: got %v", p)
+	}
+	if p := suggestionProblems(conv, ""); len(p) != 1 || p[0] != "missing suggestion" {
+		t.Errorf("empty conventional generate: got %v", p)
+	}
+	if p := suggestionProblems(conv, "Add a prefixed logger"); len(p) != 1 || p[0] != "suggestion lacks Conventional Commits prefix" {
+		t.Errorf("unprefixed conventional: got %v", p)
+	}
+	if p := suggestionProblems(conv, "feat: add a prefixed logger"); len(p) != 0 {
+		t.Errorf("prefixed conventional: got %v", p)
+	}
+	if p := suggestionProblems(ok, ""); len(p) != 0 {
+		t.Errorf("accurate needs no suggestion: got %v", p)
+	}
 }
 
 // TestEval scores the configured model against the corpus and prints a per-case
@@ -129,11 +150,17 @@ func hasConventionalPrefix(msg string) bool {
 // fail when verdict accuracy drops below that floor — useful as a gate before
 // changing the prompt.
 //
-//	GIT_CRUX_EVAL=1 OPENAI_API_KEY=... go test -run '^TestEval$' -v
+//	GIT_CRUX_EVAL=1 go test -run '^TestEval$' -v
 func TestEval(t *testing.T) {
 	if os.Getenv("GIT_CRUX_EVAL") == "" {
-		t.Skip("set GIT_CRUX_EVAL=1 (with model env) to run the evaluation set")
+		t.Skip("set GIT_CRUX_EVAL=1 to run the evaluation set")
 	}
+	// TestMain stubs auto-fm so unit tests never spawn `fm serve`. Re-enable it
+	// here so `make eval` on macOS 27 uses the on-device default.
+	prev := ensureAppleFM
+	ensureAppleFM = ensureAppleFMOnce
+	t.Cleanup(func() { ensureAppleFM = prev })
+
 	cases := loadEvalCases(t)
 	model := modelName()
 	ctx := context.Background()
@@ -156,11 +183,16 @@ func TestEval(t *testing.T) {
 			correct++
 			status = "pass"
 		}
+		sugg := strings.TrimSpace(v.Suggestion)
 		if c.want != "accurate" {
 			suggWant++
-			if strings.TrimSpace(v.Suggestion) != "" {
+			if sugg != "" {
 				suggGot++
 			}
+		}
+		if problems := suggestionProblems(c, sugg); len(problems) > 0 {
+			t.Errorf("%s: %s", c.name, strings.Join(problems, "; "))
+			status = "FAIL"
 		}
 		t.Logf("%-28s want=%-10s got=%-10s %s | %s", c.name, c.want, v.Verdict, status, v.Reason)
 	}
