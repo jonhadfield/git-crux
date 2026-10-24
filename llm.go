@@ -848,7 +848,7 @@ Choose the type that matches the DOMINANT change in the diff (use the "Files cha
 How the prefix affects the verdict:
 - A message is "accurate" ONLY IF it both (a) conveys the main intent AND (b) already begins with a valid type prefix appropriate to the diff.
 - If a prefix is present but names the WRONG type for the diff, choose "wrong" — even when the rest of the wording is also generic (e.g. "feat: update workflow" on a CI-only diff is "wrong", not "vague"). State the type mismatch in "reason".
-- If the wording describes the change well but the type prefix is MISSING, choose "vague".
+- If the wording describes the change well but the type prefix is MISSING, choose "vague", not "incomplete".
 
 Output rules:
 - Respond with ONLY the JSON object, no prose or markdown fences.
