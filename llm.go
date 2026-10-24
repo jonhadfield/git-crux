@@ -18,11 +18,11 @@ import (
 )
 
 const (
-	// Defaults target OpenAI's gpt-4o-mini, which reliably produces grounded
-	// multi-line messages. The API key is read from OPENAI_API_KEY (see apiKey).
-	// To run fully local instead, set GIT_CRUX_BASE_URL to a local
-	// OpenAI-compatible server (e.g. LM Studio at http://localhost:1234/v1) and
-	// GIT_CRUX_MODEL to a model it serves.
+	// Defaults target Apple's on-device fm model when it is installed, licensed,
+	// and available (macOS 27+). Otherwise they target OpenAI's gpt-4o-mini.
+	// An explicit GIT_CRUX_BASE_URL or a non-system GIT_CRUX_MODEL / -model
+	// keeps that backend instead. The OpenAI API key is read from OPENAI_API_KEY
+	// (see apiKey).
 	defaultBaseURL = "https://api.openai.com/v1"
 	defaultModel   = "gpt-4o-mini"
 
@@ -91,7 +91,7 @@ var loadedContext contextCache
 func loadedContextTokens(model string) int {
 	loadedContext.once.Do(func() {
 		u, err := url.Parse(baseURL())
-		if err != nil || strings.EqualFold(u.Hostname(), "api.openai.com") {
+		if err != nil || strings.EqualFold(u.Hostname(), "api.openai.com") || isFMBaseURL(baseURL()) {
 			return
 		}
 		u.Path, u.RawQuery = "/api/v0/models", ""
@@ -138,6 +138,9 @@ func contextTokens(model string) int {
 	// every request overflows.
 	if n := loadedContextTokens(model); n > 0 {
 		return n
+	}
+	if strings.EqualFold(model, fmModel) {
+		return fmContextTokens
 	}
 	m := strings.ToLower(model)
 	for _, e := range knownContext {
@@ -212,7 +215,19 @@ type verdict struct {
 
 func baseURL() string {
 	if v := os.Getenv("GIT_CRUX_BASE_URL"); v != "" {
-		return strings.TrimRight(v, "/")
+		u := strings.TrimRight(v, "/")
+		if isFMBaseURL(u) {
+			_ = ensureAppleFM()
+		}
+		return u
+	}
+	// A named non-system model is an override to OpenAI (or to whatever
+	// GIT_CRUX_BASE_URL would have been). Do not auto-start fm in front of it.
+	if prefersNonFMModel() {
+		return defaultBaseURL
+	}
+	if ensureAppleFM() {
+		return fmBaseURL
 	}
 	return defaultBaseURL
 }
@@ -222,10 +237,15 @@ func modelName() string {
 		return v
 	}
 	// Default the model to match the server we end up talking to.
-	if strings.HasPrefix(baseURL(), defaultBaseURL) {
+	u := baseURL()
+	switch {
+	case isFMBaseURL(u):
+		return fmModel
+	case strings.HasPrefix(u, defaultBaseURL):
 		return defaultModel
+	default:
+		return localModel
 	}
-	return localModel
 }
 
 // missingAPIKeyError returns a clear setup error when the default OpenAI
@@ -239,7 +259,7 @@ func missingAPIKeyError() error {
 	if err != nil || !strings.EqualFold(u.Hostname(), "api.openai.com") {
 		return nil
 	}
-	return fmt.Errorf("no API key set: export OPENAI_API_KEY (or GIT_CRUX_API_KEY), or set GIT_CRUX_BASE_URL to a local server (e.g. %s)", localBaseURL)
+	return fmt.Errorf("no API key set: export OPENAI_API_KEY (or GIT_CRUX_API_KEY), set GIT_CRUX_BASE_URL to a local server (e.g. %s), or use Apple fm on macOS 27 (sudo fm license)", localBaseURL)
 }
 
 // Commit-message styles. conventional is the default: git-crux follows the
@@ -370,7 +390,7 @@ func isContextOverflow(err error) bool {
 // evaluateWithBudget performs one verdict /chat/completions call, sending at most
 // budget bytes of diff.
 func evaluateWithBudget(ctx context.Context, message, diff, model, style string, budget int) (*verdict, error) {
-	return verdictCall(ctx, model, "asking "+model, []chatMessage{
+	return verdictCall(ctx, model, "asking "+modelLabel(model), []chatMessage{
 		{Role: "system", Content: systemPrompt(style)},
 		{Role: "user", Content: userPrompt(message, diffSummary(diff), truncateDiff(diff, budget))},
 	})
@@ -619,7 +639,8 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 	}
 	// Only sent when explicitly configured, so servers that reject an unknown
 	// field (and OpenAI models that have no reasoning phase) are unaffected.
-	if e := reasoningEffort(); e != "" {
+	// Apple fm returns 400 for reasoning_effort, so it is omitted there too.
+	if e := reasoningEffort(); e != "" && !isFMBaseURL(baseURL()) {
 		payload["reasoning_effort"] = e
 	}
 	reqBody, err := json.Marshal(payload)
@@ -683,6 +704,9 @@ func chatCompletion(ctx context.Context, model, label string, responseFormat any
 // Proxy variables are named but never printed: a proxy URL may carry
 // credentials, and this string ends up in terminals and logs.
 func connectHint(rawURL string) string {
+	if isFMBaseURL(rawURL) {
+		return "is fm serve running?"
+	}
 	if u, err := url.Parse(rawURL); err == nil {
 		switch u.Hostname() {
 		case "localhost", "127.0.0.1", "::1":
@@ -823,7 +847,8 @@ Choose the type that matches the DOMINANT change in the diff (use the "Files cha
 
 How the prefix affects the verdict:
 - A message is "accurate" ONLY IF it both (a) conveys the main intent AND (b) already begins with a valid type prefix appropriate to the diff.
-- If the wording describes the change well but the type prefix is MISSING, choose "vague"; if a prefix is present but names the WRONG type for the diff, choose "wrong". State the prefix problem in "reason".
+- If a prefix is present but names the WRONG type for the diff, choose "wrong" — even when the rest of the wording is also generic (e.g. "feat: update workflow" on a CI-only diff is "wrong", not "vague"). State the type mismatch in "reason".
+- If the wording describes the change well but the type prefix is MISSING, choose "vague".
 
 Output rules:
 - Respond with ONLY the JSON object, no prose or markdown fences.

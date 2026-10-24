@@ -71,7 +71,7 @@ Usage:
 
 Commit flags:
   -m string      Commit message. Omit to have git-crux generate one.
-  -model string  Model to use (default: from GIT_CRUX_MODEL, the server profile, or "` + defaultModel + `").
+  -model string  Model to use (default: from GIT_CRUX_MODEL, Apple fm's ` + "`" + fmModel + "`" + ` when available, else "` + defaultModel + `").
   -style string  Message style: conventional|plain (default "` + defaultStyle + `").
   -no-ai         Skip evaluation and commit as-is.
   -dry-run       Print the verdict as JSON and exit without committing.
@@ -81,10 +81,12 @@ Environment:
   GIT_CRUX_STYLE=plain   Use the plain imperative style instead of Conventional Commits.
   GIT_CRUX_TIMEOUT=300   Seconds to wait for each model reply (default 90). Raise it
                          for a large local model that answers slowly.
+  GIT_CRUX_BASE_URL      OpenAI-compatible server. Unset: Apple fm when available,
+                         otherwise OpenAI. Set to keep a chosen backend.
   GIT_CRUX_REASONING_EFFORT=none
                          Pass reasoning_effort to the server. Useful when a local
                          reasoning model returns empty content under the strict
-                         JSON schema.
+                         JSON schema. Omitted for Apple fm, which rejects it.
 `)
 }
 

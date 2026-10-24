@@ -15,12 +15,18 @@ import (
 func runCommit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("crux", flag.ExitOnError)
 	msg := fs.String("m", "", "commit message (omit to have git-crux generate one)")
-	model := fs.String("model", modelName(), "model to use")
+	model := fs.String("model", "", "model to use")
 	styleFlag := fs.String("style", "", "message style: conventional|plain (default conventional)")
 	noAI := fs.Bool("no-ai", false, "skip AI evaluation, commit as-is")
 	dryRun := fs.Bool("dry-run", false, "print the verdict as JSON and exit without committing")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	cliModel = strings.TrimSpace(*model)
+	defer func() { cliModel = "" }()
+	resolvedModel := cliModel
+	if resolvedModel == "" {
+		resolvedModel = modelName()
 	}
 	style := commitStyle(*styleFlag)
 
@@ -33,7 +39,7 @@ func runCommit(ctx context.Context, args []string) error {
 	}
 
 	if *dryRun {
-		v, err := evaluate(ctx, *msg, diff, *model, style)
+		v, err := evaluate(ctx, *msg, diff, resolvedModel, style)
 		if err != nil {
 			return err
 		}
@@ -47,12 +53,12 @@ func runCommit(ctx context.Context, args []string) error {
 		if *noAI || os.Getenv("GIT_CRUX_SKIP") != "" {
 			return fmt.Errorf(`a commit message is required when AI is disabled: git crux -m "..."`)
 		}
-		return generateAndCommit(ctx, diff, *model, style)
+		return generateAndCommit(ctx, diff, resolvedModel, style)
 	}
 
 	final := *msg
 	if !*noAI && os.Getenv("GIT_CRUX_SKIP") == "" {
-		final, err = refine(ctx, *msg, diff, *model, style)
+		final, err = refine(ctx, *msg, diff, resolvedModel, style)
 		if err != nil {
 			return err
 		}

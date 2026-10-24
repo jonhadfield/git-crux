@@ -24,6 +24,7 @@ func TestContextTokensKnownModel(t *testing.T) {
 		"llama-3.1-8b":        131072,
 		"llama-3-8b-instruct": 8192,
 		"gpt-4o":              128000,
+		"system":              8192,
 	}
 	for model, want := range cases {
 		if got := contextTokens(model); got != want {
