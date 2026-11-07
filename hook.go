@@ -84,7 +84,8 @@ func initGlobal() error {
 
 // installHookInto writes the hook shim into hooksDir, preserving any pre-existing
 // third-party hook as prepare-commit-msg.local so the shim can chain to it. fresh
-// is false when a git-crux hook is already present (nothing was rewritten).
+// is false when the current git-crux shim is already up to date (nothing was
+// rewritten). A stale git-crux shim is replaced in place without creating .local.
 func installHookInto(hooksDir string) (hookPath string, fresh bool, err error) {
 	if err = os.MkdirAll(hooksDir, 0o755); err != nil {
 		return "", false, err
@@ -92,15 +93,18 @@ func installHookInto(hooksDir string) (hookPath string, fresh bool, err error) {
 	hookPath = filepath.Join(hooksDir, "prepare-commit-msg")
 
 	if data, e := os.ReadFile(hookPath); e == nil {
-		if strings.Contains(string(data), "git-crux") {
+		current := string(data)
+		if current == hookShim {
 			return hookPath, false, nil
 		}
-		backup := hookPath + ".local"
-		if e := os.Rename(hookPath, backup); e != nil {
-			return "", false, fmt.Errorf("backing up existing hook: %w", e)
+		if !strings.Contains(current, "git-crux") {
+			backup := hookPath + ".local"
+			if e := os.Rename(hookPath, backup); e != nil {
+				return "", false, fmt.Errorf("backing up existing hook: %w", e)
+			}
+			_ = os.Chmod(backup, 0o755)
+			fmt.Println("preserved existing hook at", backup)
 		}
-		_ = os.Chmod(backup, 0o755)
-		fmt.Println("preserved existing hook at", backup)
 	}
 
 	if err = os.WriteFile(hookPath, []byte(hookShim), 0o755); err != nil {
