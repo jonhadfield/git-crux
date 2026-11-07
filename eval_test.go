@@ -14,17 +14,19 @@ import (
 
 // The evaluation set lives in testdata/eval/<case>/: a commit message
 // (message.txt, possibly empty), the staged diff (diff.patch), and the expected
-// outcome (want.json: {verdict, style, notes}). TestEvalCorpusValid checks the
-// corpus is well-formed on every run; TestEval scores the model against it and is
-// skipped unless GIT_CRUX_EVAL is set, since it needs a live model.
+// outcome (want.json: {verdict, style, notes, must_contain}). TestEvalCorpusValid
+// checks the corpus is well-formed on every run; TestEval scores the model
+// against it and is skipped unless GIT_CRUX_EVAL is set, since it needs a live
+// model.
 
 type evalCase struct {
-	name    string
-	message string
-	diff    string
-	want    string // expected verdict
-	style   string // resolved style (defaults to the project default)
-	notes   string
+	name        string
+	message     string
+	diff        string
+	want        string // expected verdict
+	style       string // resolved style (defaults to the project default)
+	notes       string
+	mustContain []string // tokens a generated suggestion must include (case-insensitive)
 }
 
 func loadEvalCases(t *testing.T) []evalCase {
@@ -54,9 +56,10 @@ func loadEvalCases(t *testing.T) []evalCase {
 			t.Fatalf("%s: %v", e.Name(), err)
 		}
 		var w struct {
-			Verdict string `json:"verdict"`
-			Style   string `json:"style"`
-			Notes   string `json:"notes"`
+			Verdict     string   `json:"verdict"`
+			Style       string   `json:"style"`
+			Notes       string   `json:"notes"`
+			MustContain []string `json:"must_contain"`
 		}
 		if err := json.Unmarshal(wantRaw, &w); err != nil {
 			t.Fatalf("%s want.json: %v", e.Name(), err)
@@ -66,12 +69,13 @@ func loadEvalCases(t *testing.T) []evalCase {
 			style = defaultStyle
 		}
 		cases = append(cases, evalCase{
-			name:    e.Name(),
-			message: strings.TrimRight(string(msg), "\n"),
-			diff:    string(diff),
-			want:    w.Verdict,
-			style:   style,
-			notes:   w.Notes,
+			name:        e.Name(),
+			message:     strings.TrimRight(string(msg), "\n"),
+			diff:        string(diff),
+			want:        w.Verdict,
+			style:       style,
+			notes:       w.Notes,
+			mustContain: w.MustContain,
 		})
 	}
 	slices.SortFunc(cases, func(a, b evalCase) int { return strings.Compare(a.name, b.name) })
@@ -101,20 +105,49 @@ func TestEvalCorpusValid(t *testing.T) {
 		if c.want == "accurate" && c.style == styleConventional && !hasConventionalPrefix(c.message) {
 			t.Errorf("%s: accurate+conventional case needs a valid type prefix, got %q", c.name, c.message)
 		}
+		if c.want == "accurate" && len(c.mustContain) > 0 {
+			t.Errorf("%s: must_contain is for generated suggestions; accurate cases have none", c.name)
+		}
+		if c.message == "" && c.want != "accurate" && len(c.mustContain) == 0 {
+			t.Errorf("%s: empty-message case needs must_contain so generate-from-scratch is scoreable", c.name)
+		}
+		lowerDiff := strings.ToLower(c.diff)
+		for _, token := range c.mustContain {
+			if strings.TrimSpace(token) == "" {
+				t.Errorf("%s: empty must_contain token", c.name)
+				continue
+			}
+			if !strings.Contains(lowerDiff, strings.ToLower(token)) {
+				t.Errorf("%s: must_contain %q does not appear in the diff", c.name, token)
+			}
+		}
 	}
 }
 
 // suggestionProblems reports generate-quality failures for one eval case: a
-// missing suggestion when the verdict is off-point, or a Conventional Commits
-// suggestion with no type prefix.
+// missing suggestion when the verdict is off-point, a Conventional Commits
+// suggestion with no type prefix, or a suggestion that omits required tokens
+// from want.json (must_contain).
 func suggestionProblems(c evalCase, suggestion string) []string {
 	sugg := strings.TrimSpace(suggestion)
 	var problems []string
 	if c.want != "accurate" && sugg == "" {
 		problems = append(problems, "missing suggestion")
+		return problems
 	}
 	if c.style == styleConventional && sugg != "" && !hasConventionalPrefix(sugg) {
 		problems = append(problems, "suggestion lacks Conventional Commits prefix")
+	}
+	if sugg != "" {
+		lower := strings.ToLower(sugg)
+		for _, token := range c.mustContain {
+			if token == "" {
+				continue
+			}
+			if !strings.Contains(lower, strings.ToLower(token)) {
+				problems = append(problems, fmt.Sprintf("suggestion missing %q", token))
+			}
+		}
 	}
 	return problems
 }
@@ -141,6 +174,21 @@ func TestSuggestionProblems(t *testing.T) {
 	}
 	if p := suggestionProblems(ok, ""); len(p) != 0 {
 		t.Errorf("accurate needs no suggestion: got %v", p)
+	}
+
+	grounded := evalCase{name: "grounded", want: "vague", style: stylePlain, mustContain: []string{"logger"}}
+	if p := suggestionProblems(grounded, "Validate email and password in login handler"); len(p) != 1 || p[0] != `suggestion missing "logger"` {
+		t.Errorf("ungrounded generate: got %v", p)
+	}
+	if p := suggestionProblems(grounded, "Add a prefixed Logger"); len(p) != 0 {
+		t.Errorf("grounded generate: got %v", p)
+	}
+	if p := suggestionProblems(grounded, ""); len(p) != 1 || p[0] != "missing suggestion" {
+		t.Errorf("empty generate should not also report missing tokens: got %v", p)
+	}
+	both := evalCase{name: "both", want: "vague", style: stylePlain, mustContain: []string{"logger", "prefix"}}
+	if p := suggestionProblems(both, "Add a logger"); len(p) != 1 || p[0] != `suggestion missing "prefix"` {
+		t.Errorf("partially grounded generate: got %v", p)
 	}
 }
 

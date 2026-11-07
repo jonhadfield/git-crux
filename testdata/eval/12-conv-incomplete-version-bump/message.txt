@@ -1,0 +1,1 @@
+feat: add debounce to the search box

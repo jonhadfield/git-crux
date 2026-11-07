@@ -1,0 +1,6 @@
+{
+  "verdict": "incomplete",
+  "style": "conventional",
+  "notes": "Valid feat prefix and debounce subject, but the unrelated API v1 to v2 bump is omitted.",
+  "must_contain": ["debounce", "v2"]
+}
