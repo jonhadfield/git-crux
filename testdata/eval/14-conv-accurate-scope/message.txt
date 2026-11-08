@@ -1,0 +1,1 @@
+feat(parser): trim whitespace before splitting fields
