@@ -330,9 +330,27 @@ func TestSystemPromptStyle(t *testing.T) {
 	if !strings.Contains(conv, "starts with a type prefix") {
 		t.Error("conventional prompt should require a type prefix when generating from an empty message")
 	}
+	if !strings.Contains(conv, "mechanism IS the change") {
+		t.Error("prompt should treat a named mechanism as the change, not an unrelated second change")
+	}
+	if !strings.Contains(conv, "feat!:") {
+		t.Error("conventional prompt should require ! for breaking API changes")
+	}
+	if !strings.Contains(conv, "constructor parameter") {
+		t.Error("conventional prompt should require grounding suggestions in diff identifiers")
+	}
+	if !strings.Contains(conv, `empty message is always "vague"`) {
+		t.Error("conventional prompt should keep empty messages as vague, not wrong")
+	}
+	if !strings.Contains(conv, "optional scope is fine") {
+		t.Error("conventional prompt should accept a reasonable optional scope")
+	}
 	plain := systemPrompt(stylePlain)
 	if strings.Contains(plain, "Conventional Commits") {
 		t.Error("plain prompt should not mention Conventional Commits")
+	}
+	if !strings.Contains(plain, "constructor parameter") {
+		t.Error("plain prompt should require grounding empty generates in diff identifiers")
 	}
 	// Both styles share the verdict vocabulary.
 	for _, p := range []string{conv, plain} {
@@ -649,9 +667,18 @@ func TestVerdictResponseFormatFor(t *testing.T) {
 	if !strings.Contains(conv, "type prefix") {
 		t.Error("conventional schema should require a type prefix")
 	}
+	if !strings.Contains(conv, "feat!:") {
+		t.Error("conventional schema should mention breaking API changes")
+	}
+	if !strings.Contains(conv, "constructor parameter") {
+		t.Error("conventional schema should require grounded identifiers")
+	}
 	plain := fmt.Sprint(verdictResponseFormatFor(stylePlain))
 	if strings.Contains(plain, "type prefix") {
 		t.Error("plain schema should not require a type prefix")
+	}
+	if !strings.Contains(plain, "constructor parameter") {
+		t.Error("plain schema should require grounded identifiers")
 	}
 }
 
@@ -684,6 +711,26 @@ func TestEmptyFieldsFallsBack(t *testing.T) {
 	}
 	if len(calls) != 2 || !calls[0] || calls[1] {
 		t.Errorf("want structured then unconstrained, got %v", calls)
+	}
+}
+
+// When both the schema call and the unconstrained retry return a non-accurate
+// verdict with an empty suggestion, surface an error rather than an inert
+// verdict the caller would treat as a successful review.
+func TestUnconstrainedEmptySuggestionErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"verdict\":\"wrong\",\"suggestion\":\"\",\"reason\":\"readme claim\"}"}}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+
+	_, err := verdictCall(context.Background(), "m", "l", stylePlain, nil)
+	if err == nil {
+		t.Fatal("expected error when unconstrained retry has no suggestion")
+	}
+	if !strings.Contains(err.Error(), "usable suggestion") {
+		t.Errorf("got %v, want usable-suggestion error", err)
 	}
 }
 

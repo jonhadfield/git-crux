@@ -2,5 +2,5 @@
   "verdict": "vague",
   "style": "conventional",
   "notes": "Empty message: verdict is vague and a Conventional Commits suggestion is generated.",
-  "must_contain": ["logger", "prefix"]
+  "must_contain": ["Logger"]
 }

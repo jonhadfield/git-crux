@@ -332,9 +332,9 @@ type chatMessage struct {
 // Apple fm weights the property description more than the system prompt, so
 // Conventional Commits requires the type prefix here, not only in prose.
 func verdictResponseFormatFor(style string) map[string]any {
-	sugg := "Complete commit message: a subject line, then (for non-trivial changes) a blank line and a '- ' bulleted body. Empty string when the verdict is accurate."
+	sugg := "Complete commit message naming every new type, constructor parameter, and struct field the diff introduces (and old/new names on a rename): a subject line, then (for non-trivial changes) a blank line and a '- ' bulleted body. Empty string when the verdict is accurate."
 	if style != stylePlain {
-		sugg = "Complete Conventional Commits message. The first line MUST begin with a type prefix (feat:, fix:, chore:, ci:, docs:, …) then an imperative description. For non-trivial changes, a blank line and '- ' bullets follow. Empty string when the verdict is accurate."
+		sugg = "Complete Conventional Commits message. The first line MUST begin with a type prefix (feat:, fix:, feat!:, chore:, …); use '!' only for renaming/removing an exported symbol or changing a caller-facing signature — not for nil checks or trims inside existing functions. Name every new exported type, constructor parameter, and struct field the diff introduces (and old/new names on a rename). For non-trivial changes, a blank line and '- ' bullets follow. Empty string when the verdict is accurate."
 	}
 	return map[string]any{
 		"type": "json_schema",
@@ -659,6 +659,9 @@ func verdictCall(ctx context.Context, model, label, style string, messages []cha
 	if err := validateVerdict(v); err != nil {
 		return nil, err
 	}
+	if !usableVerdict(v, style) {
+		return nil, fmt.Errorf("model returned %s without a usable suggestion", v.Verdict)
+	}
 	return v, nil
 }
 
@@ -868,6 +871,7 @@ Choose the verdict in THIS PRIORITY ORDER:
 
 CRITICAL RULES:
 - If the message already names the change the diff makes, choose "accurate". NEVER report a part as "omitted" or "missing" if the message already mentions it (even loosely). For example, if the message says "retry with exponential backoff" and the diff adds a retry loop with backoff, that is "accurate", not "incomplete".
+- The mechanism IS the change when the message names it. A message like "guard against nil response" whose diff only adds a nil check is "accurate" — that nil check is not a second, unrelated change.
 - Do NOT choose "incomplete" merely because the message omits mechanisms, parameters, defaults, imports, or details that belong to the change it already describes. "incomplete" requires a genuinely SEPARATE, unrelated change.
 - Be reluctant to flag. When in doubt between "accurate" and "incomplete", choose "accurate".
 
@@ -886,7 +890,7 @@ Output rules:
   * Always include the subject line. Add the blank line and "- " bullets ONLY when the diff touches several files or makes more than one notable change; a small single-purpose change is just the subject.
   * Order bullets by importance; use the "Files changed" map so no significant area is missed; describe behavior or areas, not bare filenames.
   * PRESERVE the developer's stated intent — their message is a seed. If it frames the commit (e.g. "initial." means this IS the initial commit), keep that meaning in the subject and expand in the body.
-  * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a complete commit message for the diff from scratch.
+  * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a complete commit message that names every new type, constructor parameter, and struct field the diff introduces (and old/new names on a rename).
 - "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change or mismatch. NEVER simply repeat the verdict word.
 `
 
@@ -905,27 +909,29 @@ Allowed types, and when each applies:
 - style: formatting/whitespace only, no change in code meaning.
 - chore: maintenance that fits no other type.
 - revert: reverts a previous commit.
-Choose the type that matches the DOMINANT change in the diff (use the "Files changed" map). If the change is a breaking API change, append "!" after the type or scope (e.g. "feat!:" or "feat(api)!:").
+Choose the type that matches the DOMINANT change in the diff (use the "Files changed" map). A breaking API change means renaming or removing an already-exported function or type, or changing the signature callers must use. In those cases append "!" after the type or scope (e.g. "feat!:" or "feat(api)!:"), including when the developer's message is empty. Adding a nil check, validation, trim, or other behavior inside an existing function is NOT breaking — do not use "!" and do not call such a message "wrong".
 
 How the prefix affects the verdict:
 - A message is "accurate" ONLY IF it both (a) conveys the main intent AND (b) already begins with a valid type prefix appropriate to the diff.
 - If a prefix is present but names the WRONG type for the diff, choose "wrong" — even when the rest of the wording is also generic (e.g. "feat: update workflow" on a CI-only diff is "wrong", not "vague"). State the type mismatch in "reason".
-- If the wording describes the change well but the type prefix is MISSING, choose "vague", not "incomplete".
+- An optional scope is fine when it names the area the diff touches (a file, package, or subsystem). Do not choose "wrong" merely because a scope is present or because you would have picked a different scope word.
+- If the wording describes the change well but the type prefix is MISSING, choose "vague", not "incomplete". An empty message is always "vague" (then write a complete suggestion); do not call an empty message "wrong".
 
 Output rules:
 - Respond with ONLY the JSON object, no prose or markdown fences.
 - "suggestion": when the verdict is NOT "accurate", a COMPLETE Conventional Commits message for THIS diff; otherwise "".
-  Format: "<type>(<optional scope>): <imperative description>" as the subject line, 72 characters or fewer. When the diff touches several files or makes more than one notable change, follow the subject with a blank line and "- " bullet lines, one per notable change, ordered by importance.
+  Format: "<type>(<optional scope>): <imperative description>" or "<type>!: <imperative description>" / "<type>(scope)!: …" when breaking, as the subject line, 72 characters or fewer. When the diff touches several files or makes more than one notable change, follow the subject with a blank line and "- " bullet lines, one per notable change, ordered by importance.
   Rules for the suggestion:
-  * Always begin with a valid type prefix. Add the blank line and "- " bullets ONLY when the diff touches several files or makes more than one notable change; a small single-purpose change is just the prefixed subject.
+  * Always begin with a valid type prefix (and "!" when the diff is a breaking API change). Add the blank line and "- " bullets ONLY when the diff touches several files or makes more than one notable change; a small single-purpose change is just the prefixed subject.
+  * Name concrete identifiers that appear in the diff — every new exported type, every constructor parameter, every struct field the diff introduces, and old/new names on a rename — so the suggestion is grounded; do not invent generic wording that could fit any commit.
   * Order bullets by importance; use the "Files changed" map so no significant area is missed; describe behavior or areas, not bare filenames.
   * PRESERVE the developer's stated intent — their message is a seed. If their message already implies a type, honor it unless the diff contradicts it. If it frames the commit (e.g. "initial." means this IS the initial commit), keep that meaning after the prefix.
-  * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a suggestion that starts with a type prefix (feat:, fix:, chore:, …) describing the diff.
+  * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a suggestion that starts with a type prefix (feat:, fix:, feat!:, …) and names the concrete identifiers from the diff.
 - "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change, mismatch, or missing/incorrect type. NEVER simply repeat the verdict word.
 `
 
 const promptAbsolute = `
-ABSOLUTE RULE: Describe ONLY what THIS diff changes. Do NOT copy or adapt wording from these instructions or the examples below. Words like "login", "retry", "queue", "worker", "Redis", "search", "debounce", "API" must NOT appear in your output unless they genuinely appear in the diff. If you cannot ground a bullet in the diff, omit it.
+ABSOLUTE RULE: Describe ONLY what THIS diff changes. Do NOT copy or adapt wording from these instructions or the examples below. Words like "login", "retry", "queue", "worker", "Redis", "search", "debounce", "API", "LoadConfig", "ReadConfig", "Metrics", "namespace", "rate limiter", "rate-limiter" must NOT appear in your output unless they genuinely appear in the diff. If you cannot ground a bullet in the diff, omit it.
 `
 
 const examplesPlain = `
@@ -934,6 +940,8 @@ Examples (these illustrate the verdict choice and the JSON shape ONLY — never 
 {"verdict":"vague","suggestion":"Validate email and password in login handler","reason":"message names no part of the change"}
 - diff adds a retry loop with exponential backoff to upload(), message "add retry with exponential backoff to upload":
 {"verdict":"accurate","suggestion":"","reason":"message matches the change the diff makes"}
+- diff only edits a rate-limiter helper, message "update docs with install steps":
+{"verdict":"wrong","suggestion":"Cap request retries in the rate limiter","reason":"message claims a docs change the diff does not make"}
 - diff adds a worker entry point, a Redis queue client, and a config loader across several new files, message "initial.":
 {"verdict":"vague","suggestion":"Initial commit: scaffold the job queue worker\n\n- Add the worker entry point with graceful shutdown\n- Add a Redis-backed queue client\n- Load worker settings from environment variables","reason":"message names nothing about the change"}
 - diff adds debounce to a search handler AND bumps the API base URL from v1 to v2, message "add debounce to search":
@@ -945,12 +953,18 @@ Examples (these illustrate the verdict choice and the JSON shape ONLY — never 
 {"verdict":"vague","suggestion":"feat: validate email and password in login handler","reason":"generic message with no type prefix"}
 - diff adds a retry loop with exponential backoff to upload(), message "feat: add retry with exponential backoff to upload":
 {"verdict":"accurate","suggestion":"","reason":"valid feat prefix matching the change"}
+- diff adds a nil check that returns an error when the response pointer is nil, message "fix: guard against nil response in parser":
+{"verdict":"accurate","suggestion":"","reason":"fix prefix and nil guard match the diff"}
 - diff corrects an off-by-one in pagination bounds, message "correct pagination off-by-one":
 {"verdict":"vague","suggestion":"fix: correct off-by-one in pagination bounds","reason":"accurate wording but missing fix prefix"}
 - diff only edits the CI workflow file, message "feat: update build":
 {"verdict":"wrong","suggestion":"ci: update GitHub Actions workflow","reason":"diff is CI config, not a feature"}
 - diff adds debounce to a search handler AND bumps the API base URL from v1 to v2, message "feat: add debounce to search":
 {"verdict":"incomplete","suggestion":"feat: debounce search input and upgrade API base URL to v2","reason":"unrelated API version bump not mentioned"}
+- diff renames an exported LoadConfig function to ReadConfig, message "" (empty):
+{"verdict":"vague","suggestion":"feat!: rename LoadConfig to ReadConfig","reason":"empty message on a breaking API rename"}
+- diff adds a Metrics type with a namespace field and New(namespace) constructor, message "" (empty):
+{"verdict":"vague","suggestion":"feat: add Metrics with configurable namespace","reason":"empty message; suggestion names Metrics and namespace"}
 - diff adds a worker entry point, a Redis queue client, and a config loader across several new files, message "initial.":
 {"verdict":"vague","suggestion":"feat: scaffold the job queue worker\n\n- Add the worker entry point with graceful shutdown\n- Add a Redis-backed queue client\n- Load worker settings from environment variables","reason":"message names nothing about the change"}`
 
