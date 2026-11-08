@@ -1,0 +1,11 @@
+diff --git a/api.go b/api.go
+index 1111111..2222222 100644
+--- a/api.go
++++ b/api.go
+@@ -1,5 +1,5 @@
+ package api
+ 
+-func GetUser(id string) (*User, error) {
++func FetchUser(id string) (*User, error) {
+ 	return lookup(id)
+ }

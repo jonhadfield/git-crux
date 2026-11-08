@@ -949,6 +949,8 @@ Examples (these illustrate the verdict choice and the JSON shape ONLY — never 
 {"verdict":"vague","suggestion":"fix: correct off-by-one in pagination bounds","reason":"accurate wording but missing fix prefix"}
 - diff only edits the CI workflow file, message "feat: update build":
 {"verdict":"wrong","suggestion":"ci: update GitHub Actions workflow","reason":"diff is CI config, not a feature"}
+- diff adds debounce to a search handler AND bumps the API base URL from v1 to v2, message "feat: add debounce to search":
+{"verdict":"incomplete","suggestion":"feat: debounce search input and upgrade API base URL to v2","reason":"unrelated API version bump not mentioned"}
 - diff adds a worker entry point, a Redis queue client, and a config loader across several new files, message "initial.":
 {"verdict":"vague","suggestion":"feat: scaffold the job queue worker\n\n- Add the worker entry point with graceful shutdown\n- Add a Redis-backed queue client\n- Load worker settings from environment variables","reason":"message names nothing about the change"}`
 

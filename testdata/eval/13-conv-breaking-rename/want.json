@@ -1,0 +1,6 @@
+{
+  "verdict": "vague",
+  "style": "conventional",
+  "notes": "Empty message on a breaking rename of an exported API; suggestion must use ! and name the rename.",
+  "must_contain": ["!", "FetchUser", "GetUser"]
+}

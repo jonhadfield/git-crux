@@ -324,6 +324,9 @@ func TestSystemPromptStyle(t *testing.T) {
 	if !strings.Contains(conv, `choose "vague", not "incomplete"`) {
 		t.Error("conventional prompt should say a missing type prefix is vague, not incomplete")
 	}
+	if !strings.Contains(conv, `"verdict":"incomplete"`) {
+		t.Error("conventional examples should include an incomplete case")
+	}
 	if !strings.Contains(conv, "starts with a type prefix") {
 		t.Error("conventional prompt should require a type prefix when generating from an empty message")
 	}

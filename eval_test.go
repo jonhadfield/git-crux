@@ -117,6 +117,11 @@ func TestEvalCorpusValid(t *testing.T) {
 				t.Errorf("%s: empty must_contain token", c.name)
 				continue
 			}
+			// "!" is a Conventional Commits breaking marker for the suggestion,
+			// not content copied from the diff.
+			if token == "!" {
+				continue
+			}
 			if !strings.Contains(lowerDiff, strings.ToLower(token)) {
 				t.Errorf("%s: must_contain %q does not appear in the diff", c.name, token)
 			}
@@ -189,6 +194,13 @@ func TestSuggestionProblems(t *testing.T) {
 	both := evalCase{name: "both", want: "vague", style: stylePlain, mustContain: []string{"logger", "prefix"}}
 	if p := suggestionProblems(both, "Add a logger"); len(p) != 1 || p[0] != `suggestion missing "prefix"` {
 		t.Errorf("partially grounded generate: got %v", p)
+	}
+	breaking := evalCase{name: "breaking", want: "vague", style: styleConventional, mustContain: []string{"!", "FetchUser"}}
+	if p := suggestionProblems(breaking, "feat: rename GetUser to FetchUser"); len(p) != 1 || p[0] != `suggestion missing "!"` {
+		t.Errorf("breaking rename without bang: got %v", p)
+	}
+	if p := suggestionProblems(breaking, "feat!: rename GetUser to FetchUser"); len(p) != 0 {
+		t.Errorf("breaking rename with bang: got %v", p)
 	}
 }
 

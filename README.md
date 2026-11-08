@@ -105,6 +105,9 @@ To cover **every** repository at once, install globally via git's `core.hooksPat
 git crux init --global   # installs into ~/.config/git/hooks and points core.hooksPath there
 ```
 
+Re-run `git crux init` (or `init --global`) after upgrading: it refreshes an
+outdated git-crux shim in place, and leaves a current one alone.
+
 Note: `core.hooksPath` replaces per-repo `.git/hooks`, so any existing repo-local
 hooks won't run unless moved into the shared directory.
 
@@ -348,7 +351,8 @@ token from `want.json`'s optional `must_contain` list (case-insensitive
 substrings that must appear in the suggestion so generate-from-scratch cannot
 pass by parroting the prompt). The corpus itself is validity-checked on every
 `go test` run (no model needed), so a malformed or mislabelled case fails CI:
-every `must_contain` token must appear in that case's diff, and an empty-message
+every `must_contain` token must appear in that case's diff (except `!`, which
+marks a Conventional Commits breaking suggestion), and an empty-message
 (non-accurate) case must set `must_contain` so generation is scoreable. Add a
 case by dropping a new directory into `testdata/eval/` with `message.txt`,
 `diff.patch`, and `want.json`.
