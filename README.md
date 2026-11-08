@@ -342,11 +342,16 @@ GIT_CRUX_EVAL_MIN=0.8 make eval        # also fail if verdict accuracy drops bel
 ```
 
 The runner prints a per-case PASS/FAIL table and a confusion matrix. It fails
-when a non-accurate case comes back with no suggestion, or a Conventional
-Commits case suggests a message with no type prefix. The corpus itself is
-validity-checked on every `go test` run (no model needed), so a malformed or
-mislabelled case fails CI. Add a case by dropping a new directory into
-`testdata/eval/` with `message.txt`, `diff.patch`, and `want.json`.
+when a non-accurate case comes back with no suggestion, a Conventional Commits
+case suggests a message with no type prefix, or a suggestion omits a required
+token from `want.json`'s optional `must_contain` list (case-insensitive
+substrings that must appear in the suggestion so generate-from-scratch cannot
+pass by parroting the prompt). The corpus itself is validity-checked on every
+`go test` run (no model needed), so a malformed or mislabelled case fails CI:
+every `must_contain` token must appear in that case's diff, and an empty-message
+(non-accurate) case must set `must_contain` so generation is scoreable. Add a
+case by dropping a new directory into `testdata/eval/` with `message.txt`,
+`diff.patch`, and `want.json`.
 
 The labels encode git-crux's *intended* behaviour; a model that disagrees on a
 borderline case is exactly the signal the set exists to surface.
