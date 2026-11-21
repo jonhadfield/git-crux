@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -679,6 +680,59 @@ func TestVerdictResponseFormatFor(t *testing.T) {
 	}
 	if !strings.Contains(plain, "constructor parameter") {
 		t.Error("plain schema should require grounded identifiers")
+	}
+}
+
+func TestVerdictFormatForRequestSkipsAppleFM(t *testing.T) {
+	t.Setenv("GIT_CRUX_BASE_URL", fmBaseURL)
+	if got := verdictFormatForRequest(styleConventional); got != nil {
+		t.Errorf("Apple fm format = %#v, want nil", got)
+	}
+
+	t.Setenv("GIT_CRUX_BASE_URL", "http://127.0.0.1:1234/v1")
+	if got := verdictFormatForRequest(styleConventional); got == nil {
+		t.Fatal("non-fm local server should still get the strict schema")
+	}
+}
+
+// Apple fm must never send response_format: a schema request usually comes back
+// empty there, and the unconstrained path is what produces a usable verdict.
+func TestAppleFMVerdictOmitsResponseFormat(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(fmPort))
+	if err != nil {
+		t.Skipf("port %d busy (is fm serve running?): %v", fmPort, err)
+	}
+	var sawFormat bool
+	var calls int
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]any
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		if _, ok := body["response_format"]; ok {
+			sawFormat = true
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"verdict\":\"accurate\",\"suggestion\":\"\",\"reason\":\"ok\"}"}}]}`)
+	}))
+	srv.Listener = ln
+	srv.Start()
+	defer srv.Close()
+
+	t.Setenv("GIT_CRUX_BASE_URL", fmBaseURL)
+	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
+
+	v, err := verdictCall(context.Background(), "system", "l", stylePlain, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Verdict != "accurate" {
+		t.Errorf("verdict = %q, want accurate", v.Verdict)
+	}
+	if sawFormat {
+		t.Error("Apple fm request must not include response_format")
+	}
+	if calls != 1 {
+		t.Errorf("made %d requests, want 1 (no schema fallback)", calls)
 	}
 }
 

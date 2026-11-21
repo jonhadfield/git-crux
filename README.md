@@ -189,31 +189,38 @@ labelled cases against whatever model you point it at, and reports accuracy and
 total run time. Run it with two model sizes to see the trade on your hardware
 before settling on one.
 
-### Reasoning models
+### Reasoning models and structured output
 
-A strict `json_schema` request and a model with a thinking phase can collide,
-and the answer comes back useless in one of two ways, both seen against LM
-Studio:
+Verdicts are normally requested with a strict `json_schema` `response_format`
+so the model must return a valid verdict object. That can collide with a
+thinking phase, and the answer comes back useless in one of two ways, both seen
+against LM Studio:
 
 - **nothing at all** — `finish_reason: "stop"` with `content: ""` (a 27B qwen3)
 - **a schema-shaped shell** — `{"verdict":"incomplete","suggestion":"","reason":""}`
   with `reasoning_tokens: 0`, the grammar having squeezed out the thinking phase
   (deepseek-r1-distill-qwen-7b)
 
-git-crux handles both on its own: it retries once without `response_format` and
-extracts the JSON from the free-form reply, tolerating a `<think>` block,
-markdown fences and prose either side. The verdict is then validated in code,
-since the schema is no longer enforcing it.
+git-crux handles both on its own: it prints a short stderr note, retries once
+unconstrained (no `response_format`), and extracts the JSON from the free-form
+reply, tolerating a `<think>` block, markdown fences and prose either side. The
+verdict is then validated in code, since the schema is no longer enforcing it.
+That note means a second attempt is in progress — not that the commit failed.
 
 A third shape looks like the first but is not: `content: ""` with the whole
 answer filed under `reasoning_content` (qwen3.8-27b), or `reasoning` on vLLM and
 OpenRouter. git-crux reads the verdict from there before retrying, and only when
 `content` is empty.
 
-No configuration is needed, and the retry is the better answer rather than just
-a rescue: on the same prompt, the constrained call spent 32 tokens producing
-empty strings while the unconstrained one spent 251 reasoning tokens and
-returned a grounded suggestion.
+**Apple fm** skips the strict schema on the first call. The on-device model often
+hit the empty / shell shapes above, so sending `json_schema` mostly wasted a
+round trip before the unconstrained retry. fm still retries once if the first
+free-form reply is empty or inert.
+
+No configuration is needed, and when a schema collision does trigger a retry it
+is often the better answer rather than just a rescue: on the same prompt, the
+constrained call spent 32 tokens producing empty strings while the unconstrained
+one spent 251 reasoning tokens and returned a grounded suggestion.
 
 ### Context detection
 

@@ -329,8 +329,9 @@ type chatMessage struct {
 // verdictResponseFormatFor pins the model output to our schema. This is the
 // OpenAI/LM Studio structured-outputs format; the enum guarantees a valid
 // verdict value so we never have to defend against typos like "Vague.".
-// Apple fm weights the property description more than the system prompt, so
-// Conventional Commits requires the type prefix here, not only in prose.
+// Conventional Commits also puts the type-prefix rule in the suggestion
+// property description, which some servers weight more than the system prompt.
+// Apple fm is not given this format — see verdictFormatForRequest.
 func verdictResponseFormatFor(style string) map[string]any {
 	sugg := "Complete commit message naming every new type, constructor parameter, and struct field the diff introduces (and old/new names on a rename): a subject line, then (for non-trivial changes) a blank line and a '- ' bulleted body. Empty string when the verdict is accurate."
 	if style != stylePlain {
@@ -353,6 +354,18 @@ func verdictResponseFormatFor(style string) map[string]any {
 			},
 		},
 	}
+}
+
+// verdictFormatForRequest is the response_format sent on the first verdict
+// call. Apple fm often answers a strict json_schema request with empty content
+// or an empty-field shell, forcing an unconstrained retry; skipping the schema
+// there saves a round trip. Other backends keep the schema so the enum and
+// suggestion description still constrain the first answer.
+func verdictFormatForRequest(style string) any {
+	if isFMBaseURL(baseURL()) {
+		return nil
+	}
+	return verdictResponseFormatFor(style)
 }
 
 // maxChunks bounds how many parts a single review fans out into, so a pathologically
@@ -628,11 +641,15 @@ func usableVerdict(v *verdict, style string) bool {
 // 32 tokens on empty strings - so the retry is also the better answer, not just
 // a rescue. It is validated in code because the schema no longer constrains it.
 //
+// Apple fm never gets the schema on the first call (verdictFormatForRequest), so
+// a retry there is for empty or inert free-form replies, not a schema collision.
+//
 // The retry fires only on those two shapes. Transport and HTTP errors, and
 // output that is merely unparseable, return untouched: the caller still fails
 // open on them, which is deliberate.
 func verdictCall(ctx context.Context, model, label, style string, messages []chatMessage) (*verdict, error) {
-	reply, err := chatCompletion(ctx, model, label, verdictResponseFormatFor(style), messages)
+	format := verdictFormatForRequest(style)
+	reply, err := chatCompletion(ctx, model, label, format, messages)
 	if err != nil {
 		return nil, err
 	}
@@ -647,7 +664,11 @@ func verdictCall(ctx context.Context, model, label, style string, messages []cha
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, "git-crux: the strict JSON schema produced no usable answer; retrying without it")
+	if format != nil {
+		fmt.Fprintln(os.Stderr, "git-crux: the strict JSON schema produced no usable answer; retrying unconstrained")
+	} else {
+		fmt.Fprintln(os.Stderr, "git-crux: no usable verdict; retrying")
+	}
 	reply, err = chatCompletion(ctx, model, label+" (unconstrained)", nil, messages)
 	if err != nil {
 		return nil, err
