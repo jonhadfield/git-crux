@@ -1,0 +1,11 @@
+diff --git a/app/defaults.yaml b/app/defaults.yaml
+index aaaaaaa..bbbbbbb 100644
+--- a/app/defaults.yaml
++++ b/app/defaults.yaml
+@@ -1,4 +1,4 @@
+ defaults:
+-  release: "26.03"
+-  channel: stable
++  release: "26.04"
++  channel: lts
+   path: /etc/app/defaults

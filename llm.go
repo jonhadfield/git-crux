@@ -390,18 +390,45 @@ func evaluate(ctx context.Context, message, diff, model, style string) (*verdict
 		return v, err
 	}
 	clampEmptyMessage(message, v)
+	clampPlaceholderMessage(message, v)
 	return v, nil
 }
 
 // clampEmptyMessage is a backstop: an empty developer message has nothing to
-// judge as accurate. Small models sometimes copy the "valid feat prefix"
-// example and mark generate-from-scratch as accurate.
+// judge as accurate, incomplete, or wrong. Small models sometimes copy prompt
+// examples and invent those labels for generate-from-scratch.
 func clampEmptyMessage(message string, v *verdict) {
-	if v == nil || strings.TrimSpace(message) != "" || v.Verdict != "accurate" {
+	if v == nil || strings.TrimSpace(message) != "" || v.Verdict == "vague" {
 		return
 	}
 	v.Verdict = "vague"
-	v.Reason = "no commit message was provided"
+	if strings.TrimSpace(v.Reason) == "" {
+		v.Reason = "no commit message was provided"
+	}
+}
+
+// placeholderMessages are content-free subjects that never "name" a change.
+// Small on-device models sometimes still mark them accurate or incomplete.
+var placeholderMessages = map[string]struct{}{
+	"stuff": {}, "wip": {}, "update": {}, "fix": {}, "changes": {},
+	"updates my application": {},
+}
+
+func isPlaceholderMessage(message string) bool {
+	_, ok := placeholderMessages[strings.ToLower(strings.TrimSpace(message))]
+	return ok
+}
+
+// clampPlaceholderMessage forces known placeholders to "vague". Suggestion is
+// left intact when present so refine can still offer it.
+func clampPlaceholderMessage(message string, v *verdict) {
+	if v == nil || !isPlaceholderMessage(message) || v.Verdict == "vague" {
+		return
+	}
+	v.Verdict = "vague"
+	if strings.TrimSpace(v.Reason) == "" {
+		v.Reason = "placeholder names nothing about the change"
+	}
 }
 
 // evaluateWhole reviews a diff that fits in a single request. It starts from the
@@ -453,7 +480,7 @@ func isContextOverflow(err error) bool {
 // evaluateWithBudget performs one verdict /chat/completions call, sending at most
 // budget bytes of diff.
 func evaluateWithBudget(ctx context.Context, message, diff, model, style string, budget int) (*verdict, error) {
-	return verdictCall(ctx, model, "asking "+modelLabel(model), style, []chatMessage{
+	return verdictCall(ctx, model, "asking "+modelLabel(model), style, message, []chatMessage{
 		{Role: "system", Content: systemPrompt(style)},
 		{Role: "user", Content: userPrompt(message, diffSummary(diff), truncateDiff(diff, budget))},
 	})
@@ -483,7 +510,7 @@ func evaluateChunked(ctx context.Context, message, diff, model, style string, bu
 		}
 	}
 
-	return verdictCall(ctx, model, "combining summaries", style, []chatMessage{
+	return verdictCall(ctx, model, "combining summaries", style, message, []chatMessage{
 		{Role: "system", Content: systemPrompt(style)},
 		{Role: "user", Content: userPromptDigest(message, diffSummary(diff), strings.Join(summaries, "\n"))},
 	})
@@ -647,7 +674,7 @@ func usableVerdict(v *verdict, style string) bool {
 // The retry fires only on those two shapes. Transport and HTTP errors, and
 // output that is merely unparseable, return untouched: the caller still fails
 // open on them, which is deliberate.
-func verdictCall(ctx context.Context, model, label, style string, messages []chatMessage) (*verdict, error) {
+func verdictCall(ctx context.Context, model, label, style, message string, messages []chatMessage) (*verdict, error) {
 	format := verdictFormatForRequest(style)
 	reply, err := chatCompletion(ctx, model, label, format, messages)
 	if err != nil {
@@ -659,7 +686,9 @@ func verdictCall(ctx context.Context, model, label, style string, messages []cha
 		if err != nil {
 			return nil, err
 		}
-		if usableVerdict(v, style) {
+		// Placeholder+"accurate" is not done: force one retry so small models
+		// get another chance to return vague with a real suggestion.
+		if usableVerdict(v, style) && !(v.Verdict == "accurate" && isPlaceholderMessage(message)) {
 			return v, nil
 		}
 	}
@@ -885,16 +914,19 @@ func systemPrompt(style string) string {
 const promptHead = `You review git commit messages. You are given a developer's commit message and the actual staged diff. Judge whether the message describes the change well enough to be useful in the project history.
 
 Choose the verdict in THIS PRIORITY ORDER:
-1. "wrong": the message describes something that does NOT appear in the diff; the subject is mismatched (e.g. the message mentions the README but the diff only touches code).
-2. "vague": the message is generic boilerplate that names nothing specific about THIS change and could apply to almost any commit (e.g. "update", "fix stuff", "changes", "wip", "updates my application").
+1. "wrong": the message describes something that does NOT appear in the diff; the subject is mismatched (e.g. the message mentions the README but the diff only touches code). An EMPTY message is never "wrong".
+2. "vague": the message is generic boilerplate that names nothing specific about THIS change and could apply to almost any commit (e.g. "update", "fix stuff", "changes", "wip", "updates my application"). An EMPTY message is always "vague".
 3. "incomplete": the message accurately describes its subject, but the diff ALSO makes a second change that is UNRELATED to that subject and would surprise a reader (e.g. the message says "add debounce" but the diff also bumps an API version). Before choosing this, you must be able to name the specific unrelated change.
-4. "accurate": the message conveys the main intent of the change. A high-level but correct message is accurate even if it does not restate the mechanism, function names, parameters, or values.
+4. "accurate": the message conveys the main intent of the change. A high-level but correct message is accurate even if it does not restate the mechanism, function names, parameters, or values. Never choose "accurate" for a placeholder or empty message.
 
 CRITICAL RULES:
-- If the message already names the change the diff makes, choose "accurate". NEVER report a part as "omitted" or "missing" if the message already mentions it (even loosely). For example, if the message says "retry with exponential backoff" and the diff adds a retry loop with backoff, that is "accurate", not "incomplete".
-- The mechanism IS the change when the message names it. A message like "guard against nil response" whose diff only adds a nil check is "accurate" — that nil check is not a second, unrelated change.
+- Placeholders do NOT name the change. Exact messages "stuff", "wip", "update", "fix", "changes", "updates my application", and any equally content-free boilerplate are ALWAYS "vague", full stop. Do not claim they "name" a retry, validation, debounce, or any other mechanism in the diff.
+- If the message already names the change the diff makes with concrete wording (not a placeholder), choose "accurate". NEVER report a part as "omitted" or "missing" if the message already mentions it (even loosely). For example, if the message says "retry with exponential backoff" and the diff adds a retry loop with backoff, that is "accurate", not "incomplete".
+- The mechanism IS the change when the message names it with concrete words. A message like "guard against nil response" whose diff only adds a nil check is "accurate" — that nil check is not a second, unrelated change. This rule does NOT apply to placeholders.
 - Do NOT choose "incomplete" merely because the message omits mechanisms, parameters, defaults, imports, or details that belong to the change it already describes. "incomplete" requires a genuinely SEPARATE, unrelated change.
-- Be reluctant to flag. When in doubt between "accurate" and "incomplete", choose "accurate".
+- Scan the whole diff (and the "Files changed" list) for a second subject. If one file adds debounce/search behavior and another bumps an API version path (v1→v2), and the message only mentions debounce/search, that is "incomplete" — not "accurate". Name the omitted API/version change in "reason" and put both areas in "suggestion".
+- Quote the developer's message to yourself before choosing "accurate" or "incomplete". Every area you claim the message covers must appear as words in THAT message. Do not credit the message for an API/version/config change it never mentions.
+- Prefer "wrong" when the message names a subject (README, docs, install steps, …) that does not appear in the diff — that is a subject mismatch, not "vague". When you can name a second unrelated omitted change that IS in the diff, choose "incomplete", not "accurate".
 
 Multi-file commits:
 - When the diff touches several files, judge and summarize the change AS A WHOLE, not whichever file appears first. The diff is ordered by filename, so a documentation file may lead even when the substantive work is elsewhere.
@@ -936,7 +968,7 @@ How the prefix affects the verdict:
 - A message is "accurate" ONLY IF it both (a) conveys the main intent AND (b) already begins with a valid type prefix appropriate to the diff.
 - If a prefix is present but names the WRONG type for the diff, choose "wrong" — even when the rest of the wording is also generic (e.g. "feat: update workflow" on a CI-only diff is "wrong", not "vague"). State the type mismatch in "reason".
 - An optional scope is fine when it names the area the diff touches (a file, package, or subsystem). Do not choose "wrong" merely because a scope is present or because you would have picked a different scope word.
-- If the wording describes the change well but the type prefix is MISSING, choose "vague", not "incomplete". An empty message is always "vague" (then write a complete suggestion); do not call an empty message "wrong".
+- If the wording describes the change well but the type prefix is MISSING, choose "vague", not "incomplete" and not "wrong". Soft imperative subjects without a prefix (e.g. wording that names defaults or a version) are "vague". An empty message is always "vague" (then write a complete suggestion with the right prefix, and "!" when breaking); never call an empty message "wrong" or "incomplete", even when the diff is a breaking rename.
 
 Output rules:
 - Respond with ONLY the JSON object, no prose or markdown fences.
@@ -948,6 +980,7 @@ Output rules:
   * Order bullets by importance; use the "Files changed" map so no significant area is missed; describe behavior or areas, not bare filenames.
   * PRESERVE the developer's stated intent — their message is a seed. If their message already implies a type, honor it unless the diff contradicts it. If it frames the commit (e.g. "initial." means this IS the initial commit), keep that meaning after the prefix.
   * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a suggestion that starts with a type prefix (feat:, fix:, feat!:, …) and names the concrete identifiers from the diff.
+  * Empty message on a breaking rename or removal of an exported symbol: the suggestion MUST use "!" (feat!: / fix!: / …) and MUST include both the old and new names from the diff (e.g. GetUser → FetchUser). Omitting "!" or either name is wrong.
 - "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change, mismatch, or missing/incorrect type. NEVER simply repeat the verdict word.
 `
 
@@ -959,6 +992,8 @@ const examplesPlain = `
 Examples (these illustrate the verdict choice and the JSON shape ONLY — never reuse their wording):
 - diff adds input validation to a login handler, message "stuff":
 {"verdict":"vague","suggestion":"Validate email and password in login handler","reason":"message names no part of the change"}
+- diff adds a retry loop with exponential backoff to upload(), message "wip":
+{"verdict":"vague","suggestion":"Retry upload with exponential backoff","reason":"placeholder names nothing about the change"}
 - diff adds a retry loop with exponential backoff to upload(), message "add retry with exponential backoff to upload":
 {"verdict":"accurate","suggestion":"","reason":"message matches the change the diff makes"}
 - diff only edits a rate-limiter helper, message "update docs with install steps":
@@ -978,12 +1013,16 @@ Examples (these illustrate the verdict choice and the JSON shape ONLY — never 
 {"verdict":"accurate","suggestion":"","reason":"fix prefix and nil guard match the diff"}
 - diff corrects an off-by-one in pagination bounds, message "correct pagination off-by-one":
 {"verdict":"vague","suggestion":"fix: correct off-by-one in pagination bounds","reason":"accurate wording but missing fix prefix"}
+- diff updates a defaults.yaml release field from 26.03 to 26.04, message "update defaults for 26.04.":
+{"verdict":"vague","suggestion":"chore: update defaults release to 26.04","reason":"accurate wording but missing type prefix"}
 - diff only edits the CI workflow file, message "feat: update build":
 {"verdict":"wrong","suggestion":"ci: update GitHub Actions workflow","reason":"diff is CI config, not a feature"}
 - diff adds debounce to a search handler AND bumps the API base URL from v1 to v2, message "feat: add debounce to search":
 {"verdict":"incomplete","suggestion":"feat: debounce search input and upgrade API base URL to v2","reason":"unrelated API version bump not mentioned"}
 - diff renames an exported LoadConfig function to ReadConfig, message "" (empty):
 {"verdict":"vague","suggestion":"feat!: rename LoadConfig to ReadConfig","reason":"empty message on a breaking API rename"}
+- diff renames an exported GetUser function to FetchUser, message "" (empty):
+{"verdict":"vague","suggestion":"feat!: rename GetUser to FetchUser","reason":"empty message; breaking rename needs feat!:"}
 - diff adds a Metrics type with a namespace field and New(namespace) constructor, message "" (empty):
 {"verdict":"vague","suggestion":"feat: add Metrics with configurable namespace","reason":"empty message; suggestion names Metrics and namespace"}
 - diff adds a worker entry point, a Redis queue client, and a config loader across several new files, message "initial.":

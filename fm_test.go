@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -166,7 +167,7 @@ func TestProbeStartsServeWhenNeeded(t *testing.T) {
 
 func TestProbeGivesUpWhenServeNeverBecomesReady(t *testing.T) {
 	fmServeWait = 80 * time.Millisecond
-	t.Cleanup(func() { fmServeWait = 5 * time.Second })
+	t.Cleanup(func() { fmServeWait = 20 * time.Second })
 	stubFM(t, fmStub{
 		bin:       "/usr/bin/fm",
 		license:   "Agreed to license FM1 version 1.0 on 24 Oct 2026 at 11:58.",
@@ -179,6 +180,25 @@ func TestProbeGivesUpWhenServeNeverBecomesReady(t *testing.T) {
 			t.Error("unready fm serve should not be selected")
 		}
 	})
+}
+
+// Cold starts often answer /health only after a few hundred ms; waitFMHealthy
+// must keep polling through that window rather than giving up on the first miss.
+func TestWaitFMHealthySucceedsAfterDelay(t *testing.T) {
+	fmServeWait = 400 * time.Millisecond
+	t.Cleanup(func() { fmServeWait = 20 * time.Second })
+	var n atomic.Int32
+	prev := fmCmd.healthy
+	t.Cleanup(func() { fmCmd.healthy = prev })
+	fmCmd.healthy = func() bool {
+		return n.Add(1) >= 3
+	}
+	if !waitFMHealthy() {
+		t.Fatal("expected waitFMHealthy to succeed once /health becomes ready")
+	}
+	if got := n.Load(); got < 3 {
+		t.Errorf("polls = %d, want at least 3", got)
+	}
 }
 
 func TestBaseURLPrefersFMWhenReady(t *testing.T) {

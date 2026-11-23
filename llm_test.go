@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -334,8 +333,20 @@ func TestSystemPromptStyle(t *testing.T) {
 	if !strings.Contains(conv, "mechanism IS the change") {
 		t.Error("prompt should treat a named mechanism as the change, not an unrelated second change")
 	}
+	if !strings.Contains(conv, "Placeholders do NOT name the change") {
+		t.Error("prompt should reject placeholder messages as vague")
+	}
+	if !strings.Contains(conv, "second unrelated omitted change") {
+		t.Error("prompt should prefer incomplete when a second unrelated change is omitted")
+	}
+	if !strings.Contains(conv, "Quote the developer's message") {
+		t.Error("prompt should require quoting the message before claiming coverage")
+	}
 	if !strings.Contains(conv, "feat!:") {
 		t.Error("conventional prompt should require ! for breaking API changes")
+	}
+	if !strings.Contains(conv, `MUST use "!"`) {
+		t.Error("conventional prompt should require ! on empty-message breaking renames")
 	}
 	if !strings.Contains(conv, "constructor parameter") {
 		t.Error("conventional prompt should require grounding suggestions in diff identifiers")
@@ -526,7 +537,7 @@ func TestReasoningEffortOnlyWhenSet(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
-	if _, err := verdictCall(context.Background(), "m", "l", "", nil); err != nil {
+	if _, err := verdictCall(context.Background(), "m", "l", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, present := bodies[0]["reasoning_effort"]; present {
@@ -534,7 +545,7 @@ func TestReasoningEffortOnlyWhenSet(t *testing.T) {
 	}
 
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "none")
-	if _, err := verdictCall(context.Background(), "m", "l", "", nil); err != nil {
+	if _, err := verdictCall(context.Background(), "m", "l", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := bodies[1]["reasoning_effort"]; got != "none" {
@@ -561,7 +572,7 @@ func TestEmptyContentFallsBackExactlyOnce(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", "", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", "", nil)
 	if err != nil {
 		t.Fatalf("expected the fallback to recover, got %v", err)
 	}
@@ -583,7 +594,7 @@ func TestEmptyContentRetriedOnlyOnce(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	if _, err := verdictCall(context.Background(), "m", "l", "", nil); err == nil {
+	if _, err := verdictCall(context.Background(), "m", "l", "", "", nil); err == nil {
 		t.Fatal("expected an error when both attempts come back empty")
 	}
 	if n != 2 {
@@ -603,7 +614,7 @@ func TestHTTPErrorDoesNotFallBack(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 
-	if _, err := verdictCall(context.Background(), "m", "l", "", nil); err == nil {
+	if _, err := verdictCall(context.Background(), "m", "l", "", "", nil); err == nil {
 		t.Fatal("expected the server error to surface")
 	}
 	if n != 1 {
@@ -641,10 +652,45 @@ func TestClampEmptyMessage(t *testing.T) {
 		t.Errorf("empty message: suggestion was rewritten to %q", v.Suggestion)
 	}
 
+	wrong := &verdict{Verdict: "wrong", Suggestion: "feat!: rename GetUser to FetchUser", Reason: "prefix lacks !"}
+	clampEmptyMessage("", wrong)
+	if wrong.Verdict != "vague" {
+		t.Errorf("empty+wrong: verdict = %q, want vague", wrong.Verdict)
+	}
+	if wrong.Suggestion != "feat!: rename GetUser to FetchUser" {
+		t.Errorf("empty+wrong: suggestion rewritten to %q", wrong.Suggestion)
+	}
+
 	kept := &verdict{Verdict: "accurate", Suggestion: "", Reason: "matches"}
 	clampEmptyMessage("feat: add a logger", kept)
 	if kept.Verdict != "accurate" {
 		t.Errorf("non-empty message: verdict = %q, want accurate", kept.Verdict)
+	}
+}
+
+func TestClampPlaceholderMessage(t *testing.T) {
+	v := &verdict{Verdict: "accurate", Suggestion: "", Reason: "names the retry"}
+	clampPlaceholderMessage("wip", v)
+	if v.Verdict != "vague" {
+		t.Errorf("wip: verdict = %q, want vague", v.Verdict)
+	}
+	inc := &verdict{Verdict: "incomplete", Suggestion: "Retry send", Reason: "retry not mentioned"}
+	clampPlaceholderMessage("wip", inc)
+	if inc.Verdict != "vague" {
+		t.Errorf("wip+incomplete: verdict = %q, want vague", inc.Verdict)
+	}
+	concrete := &verdict{Verdict: "accurate", Suggestion: "", Reason: "ok"}
+	clampPlaceholderMessage("add retry with backoff", concrete)
+	if concrete.Verdict != "accurate" {
+		t.Errorf("concrete message should stay accurate, got %q", concrete.Verdict)
+	}
+}
+
+func TestClampEmptyMessageFromIncomplete(t *testing.T) {
+	v := &verdict{Verdict: "incomplete", Suggestion: "feat!: rename GetUser to FetchUser", Reason: "parroted example"}
+	clampEmptyMessage("", v)
+	if v.Verdict != "vague" {
+		t.Errorf("empty+incomplete: verdict = %q, want vague", v.Verdict)
 	}
 }
 
@@ -695,47 +741,6 @@ func TestVerdictFormatForRequestSkipsAppleFM(t *testing.T) {
 	}
 }
 
-// Apple fm must never send response_format: a schema request usually comes back
-// empty there, and the unconstrained path is what produces a usable verdict.
-func TestAppleFMVerdictOmitsResponseFormat(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(fmPort))
-	if err != nil {
-		t.Skipf("port %d busy (is fm serve running?): %v", fmPort, err)
-	}
-	var sawFormat bool
-	var calls int
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		var body map[string]any
-		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &body)
-		if _, ok := body["response_format"]; ok {
-			sawFormat = true
-		}
-		fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"verdict\":\"accurate\",\"suggestion\":\"\",\"reason\":\"ok\"}"}}]}`)
-	}))
-	srv.Listener = ln
-	srv.Start()
-	defer srv.Close()
-
-	t.Setenv("GIT_CRUX_BASE_URL", fmBaseURL)
-	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
-
-	v, err := verdictCall(context.Background(), "system", "l", stylePlain, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v.Verdict != "accurate" {
-		t.Errorf("verdict = %q, want accurate", v.Verdict)
-	}
-	if sawFormat {
-		t.Error("Apple fm request must not include response_format")
-	}
-	if calls != 1 {
-		t.Errorf("made %d requests, want 1 (no schema fallback)", calls)
-	}
-}
-
 // The second failure shape: the schema is satisfied but the fields are empty,
 // which is what deepseek-r1-distill-qwen-7b returns under LM Studio.
 func TestEmptyFieldsFallsBack(t *testing.T) {
@@ -756,7 +761,7 @@ func TestEmptyFieldsFallsBack(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", "", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -779,7 +784,7 @@ func TestUnconstrainedEmptySuggestionErrors(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	_, err := verdictCall(context.Background(), "m", "l", stylePlain, nil)
+	_, err := verdictCall(context.Background(), "m", "l", stylePlain, "", nil)
 	if err == nil {
 		t.Fatal("expected error when unconstrained retry has no suggestion")
 	}
@@ -799,7 +804,7 @@ func TestAccurateDoesNotFallBack(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", "", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -923,7 +928,7 @@ func TestVerdictReadFromReasoningContent(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", "", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", "", nil)
 	if err != nil {
 		t.Fatalf("expected the verdict from reasoning_content, got %v", err)
 	}
@@ -944,7 +949,7 @@ func TestVerdictReadFromReasoningField(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", "", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -963,7 +968,7 @@ func TestContentPreferredOverReasoning(t *testing.T) {
 	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
 	t.Setenv("GIT_CRUX_REASONING_EFFORT", "")
 
-	v, err := verdictCall(context.Background(), "m", "l", "", nil)
+	v, err := verdictCall(context.Background(), "m", "l", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

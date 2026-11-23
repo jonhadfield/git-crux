@@ -1,0 +1,6 @@
+{
+  "verdict": "vague",
+  "style": "conventional",
+  "notes": "Soft imperative subject names the change but lacks the required Conventional Commits type prefix.",
+  "must_contain": ["26.04", "defaults"]
+}

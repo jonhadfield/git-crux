@@ -26,8 +26,9 @@ const (
 )
 
 // fmServeWait is how long probeAndStartFM waits for /health after spawning
-// `fm serve`. Tests shorten it.
-var fmServeWait = 5 * time.Second
+// `fm serve`. Cold starts can take several seconds after Process.Release;
+// tests shorten this.
+var fmServeWait = 20 * time.Second
 
 // cliModel is the -model flag from `git crux`. Empty in the hook and when the
 // flag is omitted. It is an override: a non-system value keeps the OpenAI
@@ -131,6 +132,12 @@ func probeAndStartFM() bool {
 	}
 	if err := fmCmd.start(bin); err != nil {
 		fmt.Fprintf(os.Stderr, "git-crux: could not start fm serve: %v\n", err)
+		// Another process may already be binding the port; wait for /health
+		// before giving up.
+		if waitFMHealthy() {
+			fmt.Fprintln(os.Stderr, "git-crux: using on-device Apple Foundation Model")
+			return true
+		}
 		return false
 	}
 	if waitFMHealthy() {
@@ -188,11 +195,25 @@ func fmServeHealthy() bool {
 func startFMServe(bin string) error {
 	cmd := exec.Command(bin, "serve", "--host", fmHost, "--port", strconv.Itoa(fmPort))
 	cmd.Stdin = nil
+	// Keep a small stderr ring so a failed cold start (e.g. address already in
+	// use) is diagnosable; stdout is unused for readiness.
+	var stderr strings.Builder
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	cmd.Stderr = &stderr
 	setDetached(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	return cmd.Process.Release()
+	if err := cmd.Process.Release(); err != nil {
+		return err
+	}
+	// Give the child a moment to fail fast before waitFMHealthy polls.
+	time.Sleep(150 * time.Millisecond)
+	if !fmServeHealthy() && stderr.Len() > 0 {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			fmt.Fprintf(os.Stderr, "git-crux: fm serve: %s\n", truncate(msg, 200))
+		}
+	}
+	return nil
 }
