@@ -30,6 +30,10 @@ const (
 // tests shorten this.
 var fmServeWait = 20 * time.Second
 
+// fmServeRetryPause is how long to wait before a second start attempt when the
+// first bind loses a port race (address already in use) or never becomes ready.
+var fmServeRetryPause = 500 * time.Millisecond
+
 // cliModel is the -model flag from `git crux`. Empty in the hook and when the
 // flag is omitted. It is an override: a non-system value keeps the OpenAI
 // default instead of auto-selecting Apple fm.
@@ -130,10 +134,29 @@ func probeAndStartFM() bool {
 		fmt.Fprintln(os.Stderr, "git-crux: using on-device Apple Foundation Model")
 		return true
 	}
+	if tryStartFMServe(bin) {
+		return true
+	}
+	// Port races leave "address already in use" with no healthy listener; wait
+	// briefly and try one more start before giving up.
+	time.Sleep(fmServeRetryPause)
+	if fmCmd.healthy() {
+		fmt.Fprintln(os.Stderr, "git-crux: using on-device Apple Foundation Model")
+		return true
+	}
+	if tryStartFMServe(bin) {
+		return true
+	}
+	fmt.Fprintln(os.Stderr, "git-crux: started fm serve but it did not become ready")
+	return false
+}
+
+// tryStartFMServe launches fm serve (or notices a start error) and waits until
+// /health succeeds. Returns true when Apple fm is usable.
+func tryStartFMServe(bin string) bool {
 	if err := fmCmd.start(bin); err != nil {
 		fmt.Fprintf(os.Stderr, "git-crux: could not start fm serve: %v\n", err)
-		// Another process may already be binding the port; wait for /health
-		// before giving up.
+		// Another process may already be binding the port; wait for it.
 		if waitFMHealthy() {
 			fmt.Fprintln(os.Stderr, "git-crux: using on-device Apple Foundation Model")
 			return true
@@ -144,7 +167,6 @@ func probeAndStartFM() bool {
 		fmt.Fprintln(os.Stderr, "git-crux: using on-device Apple Foundation Model")
 		return true
 	}
-	fmt.Fprintln(os.Stderr, "git-crux: started fm serve but it did not become ready")
 	return false
 }
 

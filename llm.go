@@ -35,9 +35,14 @@ const (
 	// Diff-budget tuning. The diff sent to the model is sized from the model's
 	// context window rather than a fixed cap, so a small model is not overflowed
 	// and a large one is not needlessly starved.
+	//
+	// reservedTokens must cover the Conventional Commits system prompt (~4k
+	// tokens) plus the user wrapper and JSON reply. charsPerToken is 2, not 3:
+	// code diffs tokenize denser than prose, and Apple fm's 8k window rejects a
+	// ~20KB chunk sized at 3 chars/token with "session's transcript exceeded".
 	defaultContextTokens = 8192  // assumed window for unrecognised models
-	reservedTokens       = 1500  // system prompt + message wrapper + JSON reply
-	charsPerToken        = 3     // conservative bytes/token, so we under-fill
+	reservedTokens       = 4500  // system prompt + message wrapper + JSON reply
+	charsPerToken        = 2     // bytes/token for code-heavy diffs (under-fill)
 	minDiffChars         = 4000  // floor: always show a useful amount
 	maxDiffCharsCeil     = 32000 // ceiling: bound local-inference latency & "lost in the middle"
 )
@@ -510,10 +515,22 @@ func evaluateChunked(ctx context.Context, message, diff, model, style string, bu
 		}
 	}
 
-	return verdictCall(ctx, model, "combining summaries", style, message, []chatMessage{
-		{Role: "system", Content: systemPrompt(style)},
-		{Role: "user", Content: userPromptDigest(message, diffSummary(diff), strings.Join(summaries, "\n"))},
-	})
+	digest := strings.Join(summaries, "\n")
+	for {
+		v, err := verdictCall(ctx, model, "combining summaries", style, message, []chatMessage{
+			{Role: "system", Content: systemPrompt(style)},
+			{Role: "user", Content: userPromptDigest(message, diffSummary(diff), digest)},
+		})
+		if err == nil || !isContextOverflow(err) || len(digest) <= minDiffChars {
+			return v, err
+		}
+		next := len(digest) / 2
+		if next < minDiffChars {
+			next = minDiffChars
+		}
+		fmt.Fprintf(os.Stderr, "git-crux: summary digest exceeded model context; retrying with a smaller digest (%d→%d bytes)\n", len(digest), next)
+		digest = truncate(digest, next)
+	}
 }
 
 // summarizeChunk asks the model to describe the changes in one part of a large
@@ -534,7 +551,12 @@ func summarizeChunk(ctx context.Context, chunk, model string, part, total, budge
 		if !isContextOverflow(err) || len(c) <= minDiffChars {
 			return "", err
 		}
-		c = truncate(c, len(c)/2)
+		next := len(c) / 2
+		if next < minDiffChars {
+			next = minDiffChars
+		}
+		fmt.Fprintf(os.Stderr, "git-crux: part %d/%d exceeded model context; retrying with a smaller slice (%d→%d bytes)\n", part, total, len(c), next)
+		c = truncate(c, next)
 	}
 }
 
@@ -924,8 +946,8 @@ CRITICAL RULES:
 - If the message already names the change the diff makes with concrete wording (not a placeholder), choose "accurate". NEVER report a part as "omitted" or "missing" if the message already mentions it (even loosely). For example, if the message says "retry with exponential backoff" and the diff adds a retry loop with backoff, that is "accurate", not "incomplete".
 - The mechanism IS the change when the message names it with concrete words. A message like "guard against nil response" whose diff only adds a nil check is "accurate" — that nil check is not a second, unrelated change. This rule does NOT apply to placeholders.
 - Do NOT choose "incomplete" merely because the message omits mechanisms, parameters, defaults, imports, or details that belong to the change it already describes. "incomplete" requires a genuinely SEPARATE, unrelated change.
-- Scan the whole diff (and the "Files changed" list) for a second subject. If one file adds debounce/search behavior and another bumps an API version path (v1→v2), and the message only mentions debounce/search, that is "incomplete" — not "accurate". Name the omitted API/version change in "reason" and put both areas in "suggestion".
-- Quote the developer's message to yourself before choosing "accurate" or "incomplete". Every area you claim the message covers must appear as words in THAT message. Do not credit the message for an API/version/config change it never mentions.
+- Scan the whole diff (and the "Files changed" list) for a second subject. If one file adds debounce/search behavior and another bumps an API version path (v1→v2 / API_BASE), and the message only mentions debounce/search (even with a valid "feat:" prefix), that is "incomplete" — not "accurate". Name the omitted API/version change in "reason" and put both areas in "suggestion".
+- Quote the developer's message to yourself before choosing "accurate" or "incomplete". Every area you claim the message covers must appear as words in THAT message. "feat: add debounce to the search box" does not mention v1, v2, API_BASE, or config — so an API version bump elsewhere makes this "incomplete".
 - Prefer "wrong" when the message names a subject (README, docs, install steps, …) that does not appear in the diff — that is a subject mismatch, not "vague". When you can name a second unrelated omitted change that IS in the diff, choose "incomplete", not "accurate".
 
 Multi-file commits:
@@ -965,7 +987,7 @@ Allowed types, and when each applies:
 Choose the type that matches the DOMINANT change in the diff (use the "Files changed" map). A breaking API change means renaming or removing an already-exported function or type, or changing the signature callers must use. In those cases append "!" after the type or scope (e.g. "feat!:" or "feat(api)!:"), including when the developer's message is empty. Adding a nil check, validation, trim, or other behavior inside an existing function is NOT breaking — do not use "!" and do not call such a message "wrong".
 
 How the prefix affects the verdict:
-- A message is "accurate" ONLY IF it both (a) conveys the main intent AND (b) already begins with a valid type prefix appropriate to the diff.
+- A message is "accurate" ONLY IF it both (a) conveys the main intent of EVERY unrelated area in the diff AND (b) already begins with a valid type prefix appropriate to the diff. A correct "feat:" / "fix:" prefix does NOT make the message "accurate" when an unrelated second change is omitted — that stays "incomplete".
 - If a prefix is present but names the WRONG type for the diff, choose "wrong" — even when the rest of the wording is also generic (e.g. "feat: update workflow" on a CI-only diff is "wrong", not "vague"). State the type mismatch in "reason".
 - An optional scope is fine when it names the area the diff touches (a file, package, or subsystem). Do not choose "wrong" merely because a scope is present or because you would have picked a different scope word.
 - If the wording describes the change well but the type prefix is MISSING, choose "vague", not "incomplete" and not "wrong". Soft imperative subjects without a prefix (e.g. wording that names defaults or a version) are "vague". An empty message is always "vague" (then write a complete suggestion with the right prefix, and "!" when breaking); never call an empty message "wrong" or "incomplete", even when the diff is a breaking rename.
@@ -1017,7 +1039,7 @@ Examples (these illustrate the verdict choice and the JSON shape ONLY — never 
 {"verdict":"vague","suggestion":"chore: update defaults release to 26.04","reason":"accurate wording but missing type prefix"}
 - diff only edits the CI workflow file, message "feat: update build":
 {"verdict":"wrong","suggestion":"ci: update GitHub Actions workflow","reason":"diff is CI config, not a feature"}
-- diff adds debounce to a search handler AND bumps the API base URL from v1 to v2, message "feat: add debounce to search":
+- diff adds debounce to a search handler AND bumps the API base URL from v1 to v2, message "feat: add debounce to the search box":
 {"verdict":"incomplete","suggestion":"feat: debounce search input and upgrade API base URL to v2","reason":"unrelated API version bump not mentioned"}
 - diff renames an exported LoadConfig function to ReadConfig, message "" (empty):
 {"verdict":"vague","suggestion":"feat!: rename LoadConfig to ReadConfig","reason":"empty message on a breaking API rename"}

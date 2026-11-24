@@ -135,9 +135,12 @@ short setup hint.
 git-crux uses `fm` when all three hold: the `fm` binary is on `PATH`,
 `fm license --status` reports the terms accepted (`sudo fm license` if not),
 and `fm available` reports the system model. It then starts `fm serve` on
-`127.0.0.1:1976` if nothing is already listening. A large diff is split and
-summarized on-device; git-crux does **not** fall over to OpenAI when the
-~8k context window is full.
+`127.0.0.1:1976` if nothing is already listening. A large diff is split into
+parts sized for the on-device ~8k window, summarized, then judged as a whole;
+git-crux does **not** fall over to OpenAI when that window is full. If a part
+or the combined digest still overflows, it shrinks and retries (Apple fm
+reports this as HTTP 500 “session's transcript exceeded the model's context
+size”).
 
 | Env var              | Default                      | Meaning                                   |
 | -------------------- | ---------------------------- | ----------------------------------------- |
@@ -329,13 +332,16 @@ shows a spinner while the model runs, and cancels cleanly on Ctrl-C.
 
 **Model quality is the gating factor**, especially for *generating* messages
 (bare `git crux` / empty `git commit`). Apple's on-device `fm` model (`system`,
-about 8k context) is the default when it is available: it is a small utility
-model that holds up on the labelled verdict set, but it is weaker at writing a
-message from scratch than `gpt-4o-mini`. Other small local models (e.g. an
-8K-context `microsoft/phi-4`) tend to parrot the prompt or truncate large diffs.
-Verdicts are requested at `temperature 0` for determinism. The prompt is tuned
-against the curated evaluation set (see above), not a broad benchmark, so expect
-rough edges on unusual diffs.
+about 8k context) is the default when it is available. On the labelled set in
+`testdata/eval/` (15 cases, including soft-imperative Conventional Commits,
+breaking renames, and incomplete multi-subject diffs) it recently scored
+**15/15** verdict accuracy with all expected suggestions present. Treat that as
+a point-in-time measure — re-run `make eval` after prompt changes — not a
+guarantee on every unusual diff. Writing a message from scratch is still weaker
+than `gpt-4o-mini`. Other small local models (e.g. an 8K-context
+`microsoft/phi-4`) tend to parrot the prompt or truncate large diffs. Verdicts
+are requested at `temperature 0` for determinism. The prompt is tuned against
+the curated evaluation set (see above), not a broad benchmark.
 
 ## Evaluation set
 

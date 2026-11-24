@@ -93,6 +93,9 @@ func TestIsContextOverflow(t *testing.T) {
 		"prompt has too many tokens for the maximum context",
 		"The session's transcript exceeded the model's context size.",
 		"model server returned 400 Bad Request: The session's transcript exceeded the model's context size.",
+		// Apple fm returns this as HTTP 500 with a JSON body — the shape users see
+		// when a chunked review overfills the on-device 8k window.
+		`model server returned 500 Internal Server Error: {"error":{"code":"500","message":"The session's transcript exceeded the model's context size.","type":"server_error"}}`,
 	}
 	for _, m := range overflow {
 		if !isContextOverflow(errString(m)) {
@@ -104,6 +107,24 @@ func TestIsContextOverflow(t *testing.T) {
 		if isContextOverflow(errString(m)) {
 			t.Errorf("misclassified %q as overflow", m)
 		}
+	}
+}
+
+// Apple fm's 8k window cannot swallow the old ~20KB chunks sized at 3 chars/token.
+// The budget for `system` must stay small enough that a single summarize call fits.
+func TestDiffBudgetFitsAppleFM(t *testing.T) {
+	loadedContext = contextCache{}
+	t.Setenv("GIT_CRUX_CONTEXT", "")
+	t.Setenv("GIT_CRUX_MAX_DIFF", "")
+	t.Setenv("GIT_CRUX_BASE_URL", "")
+	got := diffBudget(fmModel)
+	// Empirically, ~8KB of code-like content is ~3.6k prompt tokens on fm;
+	// ~20KB overflows. Keep the budget under 10KB.
+	if got > 10000 {
+		t.Errorf("Apple fm diffBudget = %d, want <= 10000 so chunked reviews fit the 8k window", got)
+	}
+	if got < minDiffChars {
+		t.Errorf("Apple fm diffBudget = %d, want >= floor %d", got, minDiffChars)
 	}
 }
 
@@ -138,6 +159,46 @@ func TestEvaluateRetriesOnOverflow(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Fatalf("expected at least one retry, got %d call(s)", calls)
+	}
+	if v.Verdict != "vague" {
+		t.Errorf("verdict = %q, want vague", v.Verdict)
+	}
+}
+
+// When the combine step overflows (Apple fm's "session's transcript exceeded"
+// after many part summaries), evaluateChunked must shrink the digest and retry
+// rather than surfacing the 500 to the user.
+func TestEvaluateChunkedRetriesCombineOverflow(t *testing.T) {
+	var verdictCalls int
+	// Long per-part summaries so the joined digest is large enough that one
+	// halving still leaves content above minDiffChars.
+	longSummary := strings.Repeat("- changed thing in a large area of the codebase\n", 200)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		s := string(body)
+		if strings.Contains(s, "json_schema") || strings.Contains(s, "per-section summaries") {
+			verdictCalls++
+			if verdictCalls == 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				io.WriteString(w, `{"error":{"code":"500","message":"The session's transcript exceeded the model's context size.","type":"server_error"}}`)
+				return
+			}
+			io.WriteString(w, `{"choices":[{"message":{"content":"{\"verdict\":\"vague\",\"suggestion\":\"feat: x\",\"reason\":\"y\"}"}}]}`)
+			return
+		}
+		fmt.Fprintf(w, `{"choices":[{"message":{"content":%q}}]}`, longSummary)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_MAX_DIFF", "200")
+
+	diff := makeFileDiff("a.go", 80) + makeFileDiff("b.go", 80) + makeFileDiff("c.go", 80)
+	v, err := evaluate(context.Background(), "msg", diff, "gpt-4o", styleConventional)
+	if err != nil {
+		t.Fatalf("expected combine overflow to recover, got %v", err)
+	}
+	if verdictCalls < 2 {
+		t.Fatalf("expected combine retry, got %d verdict call(s)", verdictCalls)
 	}
 	if v.Verdict != "vague" {
 		t.Errorf("verdict = %q, want vague", v.Verdict)
@@ -339,8 +400,11 @@ func TestSystemPromptStyle(t *testing.T) {
 	if !strings.Contains(conv, "second unrelated omitted change") {
 		t.Error("prompt should prefer incomplete when a second unrelated change is omitted")
 	}
-	if !strings.Contains(conv, "Quote the developer's message") {
-		t.Error("prompt should require quoting the message before claiming coverage")
+	if !strings.Contains(conv, `does NOT make the message "accurate"`) {
+		t.Error("conventional prompt should say a type prefix does not fix incomplete")
+	}
+	if !strings.Contains(conv, "feat: add debounce to the search box") {
+		t.Error("conventional examples should include the incomplete search-box case")
 	}
 	if !strings.Contains(conv, "feat!:") {
 		t.Error("conventional prompt should require ! for breaking API changes")

@@ -167,19 +167,64 @@ func TestProbeStartsServeWhenNeeded(t *testing.T) {
 
 func TestProbeGivesUpWhenServeNeverBecomesReady(t *testing.T) {
 	fmServeWait = 80 * time.Millisecond
-	t.Cleanup(func() { fmServeWait = 20 * time.Second })
+	fmServeRetryPause = 20 * time.Millisecond
+	t.Cleanup(func() {
+		fmServeWait = 20 * time.Second
+		fmServeRetryPause = 500 * time.Millisecond
+	})
+	var starts int
 	stubFM(t, fmStub{
 		bin:       "/usr/bin/fm",
 		license:   "Agreed to license FM1 version 1.0 on 24 Oct 2026 at 11:58.",
 		available: "System model available",
 		healthy:   false,
-		start:     func() error { return nil },
+		start: func() error {
+			starts++
+			return nil
+		},
 	})
 	captureStderr(t, func() {
 		if probeAndStartFM() {
 			t.Error("unready fm serve should not be selected")
 		}
 	})
+	if starts != 2 {
+		t.Errorf("starts = %d, want 2 (initial + one retry)", starts)
+	}
+}
+
+// When the first start loses a port race, a short pause and second attempt
+// should still select Apple fm once /health comes up.
+func TestProbeRetriesAfterPortRace(t *testing.T) {
+	fmServeWait = 80 * time.Millisecond
+	fmServeRetryPause = 20 * time.Millisecond
+	t.Cleanup(func() {
+		fmServeWait = 20 * time.Second
+		fmServeRetryPause = 500 * time.Millisecond
+	})
+	var starts int
+	healthy := false
+	stubFM(t, fmStub{
+		bin:       "/usr/bin/fm",
+		license:   "Agreed to license FM1 version 1.0 on 24 Oct 2026 at 11:58.",
+		available: "System model available",
+		healthyFn: func() bool { return healthy },
+		start: func() error {
+			starts++
+			if starts >= 2 {
+				healthy = true
+			}
+			return nil
+		},
+	})
+	captureStderr(t, func() {
+		if !probeAndStartFM() {
+			t.Error("second start should select Apple fm once /health succeeds")
+		}
+	})
+	if starts != 2 {
+		t.Errorf("starts = %d, want 2", starts)
+	}
 }
 
 // Cold starts often answer /health only after a few hundred ms; waitFMHealthy
