@@ -110,6 +110,19 @@ func TestIsContextOverflow(t *testing.T) {
 	}
 }
 
+func TestShrinkOverflowInput(t *testing.T) {
+	if next, ok := shrinkOverflowInput(strings.Repeat("x", 9000)); !ok || next != 4500 {
+		t.Errorf("9000 → next=%d ok=%v, want 4500 true", next, ok)
+	}
+	// Near the old minDiffChars floor: must still shrink, not bump back up.
+	if next, ok := shrinkOverflowInput(strings.Repeat("x", 4023)); !ok || next != 2011 {
+		t.Errorf("4023 → next=%d ok=%v, want 2011 true", next, ok)
+	}
+	if _, ok := shrinkOverflowInput(strings.Repeat("x", minOverflowRetryChars)); ok {
+		t.Error("at minOverflowRetryChars must not retry")
+	}
+}
+
 // Apple fm's 8k window cannot swallow the old ~20KB chunks sized at 3 chars/token.
 // The budget for `system` must stay small enough that a single summarize call fits.
 func TestDiffBudgetFitsAppleFM(t *testing.T) {

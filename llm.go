@@ -521,21 +521,37 @@ func evaluateChunked(ctx context.Context, message, diff, model, style string, bu
 			{Role: "system", Content: systemPrompt(style)},
 			{Role: "user", Content: userPromptDigest(message, diffSummary(diff), digest)},
 		})
-		if err == nil || !isContextOverflow(err) || len(digest) <= minDiffChars {
+		if err == nil || !isContextOverflow(err) {
 			return v, err
 		}
-		next := len(digest) / 2
-		if next < minDiffChars {
-			next = minDiffChars
+		next, ok := shrinkOverflowInput(digest)
+		if !ok {
+			return v, err
 		}
 		fmt.Fprintf(os.Stderr, "git-crux: summary digest exceeded model context; retrying with a smaller digest (%d→%d bytes)\n", len(digest), next)
-		digest = truncate(digest, next)
+		digest = digest[:next]
 	}
+}
+
+// minOverflowRetryChars is the smallest input we will retry after a context
+// overflow. Below this, further shrinking is unlikely to help and we surface
+// the error. Kept well under minDiffChars so a floor bump cannot fight
+// truncate()'s "...(diff truncated)..." suffix into an infinite loop.
+const minOverflowRetryChars = 512
+
+// shrinkOverflowInput returns the next hard-cut length (half of n), or false
+// when the input is already too small to retry.
+func shrinkOverflowInput(s string) (int, bool) {
+	next := len(s) / 2
+	if next < minOverflowRetryChars {
+		return 0, false
+	}
+	return next, true
 }
 
 // summarizeChunk asks the model to describe the changes in one part of a large
 // diff as terse bullet lines. If the part still overflows the model's real
-// context, it halves the part and retries down to the floor.
+// context, it halves the part and retries down to minOverflowRetryChars.
 func summarizeChunk(ctx context.Context, chunk, model string, part, total, budget int) (string, error) {
 	c := chunk
 	for {
@@ -548,15 +564,17 @@ func summarizeChunk(ctx context.Context, chunk, model string, part, total, budge
 			// be the model thinking aloud, not bullet lines.
 			return strings.TrimSpace(reply.Content), nil
 		}
-		if !isContextOverflow(err) || len(c) <= minDiffChars {
+		if !isContextOverflow(err) {
 			return "", err
 		}
-		next := len(c) / 2
-		if next < minDiffChars {
-			next = minDiffChars
+		next, ok := shrinkOverflowInput(c)
+		if !ok {
+			return "", err
 		}
 		fmt.Fprintf(os.Stderr, "git-crux: part %d/%d exceeded model context; retrying with a smaller slice (%d→%d bytes)\n", part, total, len(c), next)
-		c = truncate(c, next)
+		// Hard cut — do not use truncate(), whose marker suffix can leave the
+		// string longer than the target and loop forever near the floor.
+		c = c[:next]
 	}
 }
 
