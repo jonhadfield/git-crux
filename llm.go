@@ -43,8 +43,13 @@ const (
 	defaultContextTokens = 8192  // assumed window for unrecognised models
 	reservedTokens       = 4500  // system prompt + message wrapper + JSON reply
 	charsPerToken        = 2     // bytes/token for code-heavy diffs (under-fill)
-	minDiffChars         = 4000  // floor: always show a useful amount
+	minDiffChars         = 4000  // floor for large-window models: always show a useful amount
 	maxDiffCharsCeil     = 32000 // ceiling: bound local-inference latency & "lost in the middle"
+	// smallContextDiffCap is the per-part byte cap when the model window is
+	// ≤8k (Apple fm, phi-3, …). Empirically ~7KB dense Go still overflows fm
+	// on the first summarize; starting at 3KB usually fits without a shrink.
+	smallContextTokens  = 8192
+	smallContextDiffCap = 3000
 )
 
 // knownContext maps a lower-cased substring of a model id to its context window
@@ -159,12 +164,24 @@ func contextTokens(model string) int {
 
 // diffBudget returns how many diff bytes to send for model. GIT_CRUX_MAX_DIFF
 // overrides everything; otherwise the budget scales with the model's context
-// window, clamped to a sane [floor, ceiling].
+// window, clamped to a sane [floor, ceiling]. Windows of 8k or less use a
+// tighter cap so the first summarize usually fits (overflow shrink remains as
+// backup).
 func diffBudget(model string) int {
 	if n, ok := envInt("GIT_CRUX_MAX_DIFF"); ok {
 		return n
 	}
-	budget := (contextTokens(model) - reservedTokens) * charsPerToken
+	ctx := contextTokens(model)
+	budget := (ctx - reservedTokens) * charsPerToken
+	if ctx <= smallContextTokens {
+		if budget > smallContextDiffCap || budget < 1 {
+			budget = smallContextDiffCap
+		}
+		if budget < minOverflowRetryChars {
+			return minOverflowRetryChars
+		}
+		return budget
+	}
 	if budget < minDiffChars {
 		return minDiffChars
 	}
@@ -396,6 +413,7 @@ func evaluate(ctx context.Context, message, diff, model, style string) (*verdict
 	}
 	clampEmptyMessage(message, v)
 	clampPlaceholderMessage(message, v)
+	clampParrotedReason(message, diff, v)
 	return v, nil
 }
 
@@ -433,6 +451,28 @@ func clampPlaceholderMessage(message string, v *verdict) {
 	v.Verdict = "vague"
 	if strings.TrimSpace(v.Reason) == "" {
 		v.Reason = "placeholder names nothing about the change"
+	}
+}
+
+// clampParrotedReason replaces example-copied reasons that do not fit the diff.
+// Small models often reuse "unrelated API version bump not mentioned" from the
+// incomplete examples even when the diff has no version change.
+func clampParrotedReason(message, diff string, v *verdict) {
+	if v == nil {
+		return
+	}
+	reason := strings.ToLower(v.Reason)
+	lowerDiff := strings.ToLower(diff)
+	if strings.Contains(reason, "api version") || strings.Contains(reason, "version bump") {
+		hasVersion := strings.Contains(lowerDiff, "/api/v") || strings.Contains(lowerDiff, "api_base") ||
+			(strings.Contains(lowerDiff, "v1") && strings.Contains(lowerDiff, "v2"))
+		if !hasVersion {
+			if strings.TrimSpace(message) == "" {
+				v.Reason = "no commit message was provided"
+			} else {
+				v.Reason = "reason did not match the diff"
+			}
+		}
 	}
 }
 
@@ -984,7 +1024,7 @@ Output rules:
   * Order bullets by importance; use the "Files changed" map so no significant area is missed; describe behavior or areas, not bare filenames.
   * PRESERVE the developer's stated intent — their message is a seed. If it frames the commit (e.g. "initial." means this IS the initial commit), keep that meaning in the subject and expand in the body.
   * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a complete commit message that names every new type, constructor parameter, and struct field the diff introduces (and old/new names on a rename).
-- "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change or mismatch. NEVER simply repeat the verdict word.
+- "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change or mismatch. NEVER simply repeat the verdict word. NEVER copy a reason from the examples unless it fits THIS diff (e.g. do not mention an API version bump when the diff has none).
 `
 
 const promptFormatConventional = `
@@ -1021,7 +1061,7 @@ Output rules:
   * PRESERVE the developer's stated intent — their message is a seed. If their message already implies a type, honor it unless the diff contradicts it. If it frames the commit (e.g. "initial." means this IS the initial commit), keep that meaning after the prefix.
   * If the developer's message is EMPTY, there is nothing to preserve: choose verdict "vague" and write a suggestion that starts with a type prefix (feat:, fix:, feat!:, …) and names the concrete identifiers from the diff.
   * Empty message on a breaking rename or removal of an exported symbol: the suggestion MUST use "!" (feat!: / fix!: / …) and MUST include both the old and new names from the diff (e.g. GetUser → FetchUser). Omitting "!" or either name is wrong.
-- "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change, mismatch, or missing/incorrect type. NEVER simply repeat the verdict word.
+- "reason": a concrete phrase of 12 words or fewer explaining WHY, referring to the actual change, mismatch, or missing/incorrect type. NEVER simply repeat the verdict word. NEVER copy a reason from the examples unless it fits THIS diff (e.g. do not mention an API version bump when the diff has none). For an empty message, prefer "no commit message was provided" or name the concrete mismatch (missing prefix, breaking rename, …).
 `
 
 const promptAbsolute = `

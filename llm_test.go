@@ -47,13 +47,16 @@ func TestContextTokensEnvOverride(t *testing.T) {
 }
 
 func TestDiffBudgetScalesWithModel(t *testing.T) {
-	small := diffBudget("phi-3")  // 4096 ctx
+	loadedContext = contextCache{}
+	t.Setenv("GIT_CRUX_CONTEXT", "")
+	t.Setenv("GIT_CRUX_MAX_DIFF", "")
+	small := diffBudget("phi-3")  // 4096 ctx → small-window cap
 	large := diffBudget("gpt-4o") // 128000 ctx
 	if small >= large {
 		t.Errorf("budget did not scale: small(phi-3)=%d large(gpt-4o)=%d", small, large)
 	}
-	if small < minDiffChars {
-		t.Errorf("small budget %d below floor %d", small, minDiffChars)
+	if small != smallContextDiffCap {
+		t.Errorf("phi-3 budget = %d, want small-context cap %d", small, smallContextDiffCap)
 	}
 	if large > maxDiffCharsCeil {
 		t.Errorf("large budget %d above ceiling %d", large, maxDiffCharsCeil)
@@ -61,9 +64,15 @@ func TestDiffBudgetScalesWithModel(t *testing.T) {
 }
 
 func TestDiffBudgetFloorAndCeiling(t *testing.T) {
-	t.Setenv("GIT_CRUX_CONTEXT", "1000") // tiny window → would compute below floor
-	if got := diffBudget("anything"); got != minDiffChars {
-		t.Errorf("tiny context = %d, want floor %d", got, minDiffChars)
+	loadedContext = contextCache{}
+	t.Setenv("GIT_CRUX_MAX_DIFF", "")
+	t.Setenv("GIT_CRUX_CONTEXT", "1000") // tiny ≤8k window → small-context cap, not the large-window floor
+	if got := diffBudget("anything"); got != smallContextDiffCap {
+		t.Errorf("tiny context = %d, want small-context cap %d", got, smallContextDiffCap)
+	}
+	t.Setenv("GIT_CRUX_CONTEXT", "128000")
+	if got := diffBudget("gpt-4o"); got != maxDiffCharsCeil {
+		t.Errorf("huge context = %d, want ceiling %d", got, maxDiffCharsCeil)
 	}
 }
 
@@ -131,13 +140,8 @@ func TestDiffBudgetFitsAppleFM(t *testing.T) {
 	t.Setenv("GIT_CRUX_MAX_DIFF", "")
 	t.Setenv("GIT_CRUX_BASE_URL", "")
 	got := diffBudget(fmModel)
-	// Empirically, ~8KB of code-like content is ~3.6k prompt tokens on fm;
-	// ~20KB overflows. Keep the budget under 10KB.
-	if got > 10000 {
-		t.Errorf("Apple fm diffBudget = %d, want <= 10000 so chunked reviews fit the 8k window", got)
-	}
-	if got < minDiffChars {
-		t.Errorf("Apple fm diffBudget = %d, want >= floor %d", got, minDiffChars)
+	if got != smallContextDiffCap {
+		t.Errorf("Apple fm diffBudget = %d, want small-context cap %d", got, smallContextDiffCap)
 	}
 }
 
@@ -424,6 +428,9 @@ func TestSystemPromptStyle(t *testing.T) {
 	}
 	if !strings.Contains(conv, `MUST use "!"`) {
 		t.Error("conventional prompt should require ! on empty-message breaking renames")
+	}
+	if !strings.Contains(conv, "NEVER copy a reason from the examples") {
+		t.Error("prompt should forbid parroting example reasons onto unrelated diffs")
 	}
 	if !strings.Contains(conv, "constructor parameter") {
 		t.Error("conventional prompt should require grounding suggestions in diff identifiers")
@@ -768,6 +775,21 @@ func TestClampEmptyMessageFromIncomplete(t *testing.T) {
 	clampEmptyMessage("", v)
 	if v.Verdict != "vague" {
 		t.Errorf("empty+incomplete: verdict = %q, want vague", v.Verdict)
+	}
+}
+
+func TestClampParrotedReason(t *testing.T) {
+	renameDiff := "diff --git a/api.go b/api.go\n-func GetUser\n+func FetchUser\n"
+	v := &verdict{Reason: "unrelated API version bump not mentioned"}
+	clampParrotedReason("", renameDiff, v)
+	if v.Reason != "no commit message was provided" {
+		t.Errorf("empty+parrot: reason = %q", v.Reason)
+	}
+	kept := &verdict{Reason: "unrelated API version bump not mentioned"}
+	versionDiff := "export const API_BASE = '/api/v2'\n"
+	clampParrotedReason("feat: debounce", versionDiff, kept)
+	if kept.Reason != "unrelated API version bump not mentioned" {
+		t.Errorf("version diff should keep reason, got %q", kept.Reason)
 	}
 }
 
