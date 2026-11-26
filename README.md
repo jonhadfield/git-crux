@@ -59,6 +59,16 @@ stapled ticket, so it installs with no Gatekeeper warning; a bare binary from
 one of the tarballs is quarantined by the browser and refused instead.
 Double-clicking the `.pkg` works too.
 
+Or, on Linux (amd64 or arm64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jonhadfield/git-crux/main/install.sh | sh
+```
+
+That downloads the matching release tarball, checks its sha256 against
+`checksums.txt`, and installs `git-crux` to `/usr/local/bin` (override with
+`PREFIX=...`). Pin a release with `GIT_CRUX_VERSION=1.5.4`.
+
 Or with Go 1.22 or later:
 
 ```sh

@@ -54,6 +54,13 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# Ship the Linux curl installer with each release so
+#   curl -fsSL …/releases/latest/download/install.sh | sh
+# stays in sync with the artefacts it downloads.
+release:
+  extra_files:
+    - glob: ./install.sh
+
 changelog:
   use: github
   sort: asc
