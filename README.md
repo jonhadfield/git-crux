@@ -67,7 +67,17 @@ curl -fsSL https://raw.githubusercontent.com/jonhadfield/git-crux/main/install.s
 
 That downloads the matching release tarball, checks its sha256 against
 `checksums.txt`, and installs `git-crux` to `/usr/local/bin` (override with
-`PREFIX=...`). Pin a release with `GIT_CRUX_VERSION=1.5.4`.
+`PREFIX=...`). Pin a release with `GIT_CRUX_VERSION=1.5.5`.
+
+Or, on Windows (amd64):
+
+```powershell
+curl.exe -fLO https://github.com/jonhadfield/git-crux/releases/latest/download/git-crux_windows_amd64.zip
+Expand-Archive -Force git-crux_windows_amd64.zip -DestinationPath $env:LOCALAPPDATA\git-crux
+```
+
+Put `%LOCALAPPDATA%\git-crux` on your `PATH` (or copy `git-crux.exe` somewhere
+already on it).
 
 Or with Go 1.22 or later:
 
@@ -148,9 +158,10 @@ and `fm available` reports the system model. It then starts `fm serve` on
 `127.0.0.1:1976` if nothing is already listening. A large diff is split into
 parts sized for the on-device ~8k window, summarized, then judged as a whole;
 git-crux does **not** fall over to OpenAI when that window is full. If a part
-or the combined digest still overflows, it shrinks and retries (Apple fm
-reports this as HTTP 500 “session's transcript exceeded the model's context
-size”).
+still overflows, it shrinks and retries; if the combined digest overflows, it
+asks the model to condense the summaries (falling back to a hard cut only if
+condense does not shrink them). Apple fm reports this as HTTP 500 “session's
+transcript exceeded the model's context size”.
 
 | Env var              | Default                      | Meaning                                   |
 | -------------------- | ---------------------------- | ----------------------------------------- |

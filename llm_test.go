@@ -183,16 +183,21 @@ func TestEvaluateRetriesOnOverflow(t *testing.T) {
 }
 
 // When the combine step overflows (Apple fm's "session's transcript exceeded"
-// after many part summaries), evaluateChunked must shrink the digest and retry
-// rather than surfacing the 500 to the user.
+// after many part summaries), evaluateChunked must condense the digest and
+// retry rather than surfacing the 500 to the user.
 func TestEvaluateChunkedRetriesCombineOverflow(t *testing.T) {
-	var verdictCalls int
-	// Long per-part summaries so the joined digest is large enough that one
-	// halving still leaves content above minDiffChars.
+	var verdictCalls, condenseCalls int
+	// Long per-part summaries so the joined digest overflows the combine step.
 	longSummary := strings.Repeat("- changed thing in a large area of the codebase\n", 200)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		s := string(body)
+		// Condense prompts also say "per-section summaries"; match them first.
+		if strings.Contains(s, "Compress these per-section summaries") {
+			condenseCalls++
+			io.WriteString(w, `{"choices":[{"message":{"content":"- changed thing a\n- changed thing b\n- changed thing c"}}]}`)
+			return
+		}
 		if strings.Contains(s, "json_schema") || strings.Contains(s, "per-section summaries") {
 			verdictCalls++
 			if verdictCalls == 1 {
@@ -216,6 +221,55 @@ func TestEvaluateChunkedRetriesCombineOverflow(t *testing.T) {
 	}
 	if verdictCalls < 2 {
 		t.Fatalf("expected combine retry, got %d verdict call(s)", verdictCalls)
+	}
+	if condenseCalls < 1 {
+		t.Fatalf("expected digest condense before retry, got %d condense call(s)", condenseCalls)
+	}
+	if v.Verdict != "vague" {
+		t.Errorf("verdict = %q, want vague", v.Verdict)
+	}
+}
+
+// If condensing fails to shrink the digest, evaluateChunked falls back to a
+// hard cut so combine overflow still recovers.
+func TestEvaluateChunkedHardCutsWhenCondenseDoesNotShrink(t *testing.T) {
+	var verdictCalls, condenseCalls int
+	longSummary := strings.Repeat("- changed thing in a large area of the codebase\n", 200)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		s := string(body)
+		if strings.Contains(s, "Compress these per-section summaries") {
+			condenseCalls++
+			// Echo a still-huge list so len(condensed) is not smaller.
+			fmt.Fprintf(w, `{"choices":[{"message":{"content":%q}}]}`, longSummary+longSummary)
+			return
+		}
+		if strings.Contains(s, "json_schema") || strings.Contains(s, "per-section summaries") {
+			verdictCalls++
+			if verdictCalls == 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				io.WriteString(w, `{"error":{"code":"500","message":"The session's transcript exceeded the model's context size.","type":"server_error"}}`)
+				return
+			}
+			io.WriteString(w, `{"choices":[{"message":{"content":"{\"verdict\":\"vague\",\"suggestion\":\"feat: x\",\"reason\":\"y\"}"}}]}`)
+			return
+		}
+		fmt.Fprintf(w, `{"choices":[{"message":{"content":%q}}]}`, longSummary)
+	}))
+	defer srv.Close()
+	t.Setenv("GIT_CRUX_BASE_URL", srv.URL)
+	t.Setenv("GIT_CRUX_MAX_DIFF", "200")
+
+	diff := makeFileDiff("a.go", 80) + makeFileDiff("b.go", 80) + makeFileDiff("c.go", 80)
+	v, err := evaluate(context.Background(), "msg", diff, "gpt-4o", styleConventional)
+	if err != nil {
+		t.Fatalf("expected hard-cut fallback to recover, got %v", err)
+	}
+	if condenseCalls < 1 {
+		t.Fatalf("expected a condense attempt, got %d", condenseCalls)
+	}
+	if verdictCalls < 2 {
+		t.Fatalf("expected combine retry after hard cut, got %d verdict call(s)", verdictCalls)
 	}
 	if v.Verdict != "vague" {
 		t.Errorf("verdict = %q, want vague", v.Verdict)

@@ -556,7 +556,7 @@ func evaluateChunked(ctx context.Context, message, diff, model, style string, bu
 	}
 
 	digest := strings.Join(summaries, "\n")
-	for {
+	for attempt := 0; ; attempt++ {
 		v, err := verdictCall(ctx, model, "combining summaries", style, message, []chatMessage{
 			{Role: "system", Content: systemPrompt(style)},
 			{Role: "user", Content: userPromptDigest(message, diffSummary(diff), digest)},
@@ -564,12 +564,53 @@ func evaluateChunked(ctx context.Context, message, diff, model, style string, bu
 		if err == nil || !isContextOverflow(err) {
 			return v, err
 		}
+		if attempt >= maxDigestRetries {
+			return v, err
+		}
+		// Prefer a model condense that keeps every distinct change over a
+		// blind byte cut that drops the second half of the summaries.
+		if condensed, cerr := condenseDigest(ctx, model, digest); cerr == nil {
+			if n := strings.TrimSpace(condensed); n != "" && len(n) < len(digest) {
+				fmt.Fprintf(os.Stderr, "git-crux: summary digest exceeded model context; condensing (%d→%d bytes)\n", len(digest), len(n))
+				digest = n
+				continue
+			}
+		}
 		next, ok := shrinkOverflowInput(digest)
 		if !ok {
 			return v, err
 		}
 		fmt.Fprintf(os.Stderr, "git-crux: summary digest exceeded model context; retrying with a smaller digest (%d→%d bytes)\n", len(digest), next)
 		digest = digest[:next]
+	}
+}
+
+// maxDigestRetries caps how many times the combine step may condense or
+// hard-cut after a context overflow before surfacing the error.
+const maxDigestRetries = 8
+
+// condenseDigest asks the model to rewrite a too-long per-part summary list
+// into a shorter bullet list that still covers every distinct change. If the
+// condense request itself overflows, the input is hard-cut and retried.
+func condenseDigest(ctx context.Context, model, digest string) (string, error) {
+	c := digest
+	for {
+		reply, err := chatCompletion(ctx, model, "condensing summaries", nil, []chatMessage{
+			{Role: "system", Content: condenseDigestSystemPrompt},
+			{Role: "user", Content: "Compress these per-section summaries into a shorter bullet list that still covers every distinct change:\n" + c},
+		})
+		if err == nil {
+			return strings.TrimSpace(reply.Content), nil
+		}
+		if !isContextOverflow(err) {
+			return "", err
+		}
+		next, ok := shrinkOverflowInput(c)
+		if !ok {
+			return "", err
+		}
+		fmt.Fprintf(os.Stderr, "git-crux: digest condense exceeded model context; retrying with a smaller input (%d→%d bytes)\n", len(c), next)
+		c = c[:next]
 	}
 }
 
@@ -1125,6 +1166,11 @@ func userPrompt(message, summary, diff string) string {
 // The output is fed back, alongside the other parts' digests, into the verdict
 // call — so it must stay grounded in what the part actually shows.
 const summarizeSystemPrompt = `You are summarizing ONE part of a larger git diff so it can be reviewed as a whole. List the concrete changes in THIS part as terse "- " bullet lines: what was added, removed, or changed, and in which files or functions. Describe ONLY what appears in this part; do not guess the overall intent or mention anything you cannot see here. Respond with ONLY the bullet lines, no preamble or commentary.`
+
+// condenseDigestSystemPrompt is used when the joined per-part summaries are
+// still too large for the verdict call. Keep every distinct concrete change;
+// only merge duplicates and drop fluff.
+const condenseDigestSystemPrompt = `You are compressing per-section summaries of a large git diff into a shorter bullet list for a final review. Keep every distinct concrete change (files, symbols, behaviors). Merge duplicate or overlapping lines. Do not invent changes that are not in the input. Respond with ONLY terse "- " bullet lines, no preamble or commentary.`
 
 // userPromptDigest builds the reduce-step prompt: the developer's message, the
 // full file map, and the per-part summaries standing in for the (too-large) diff.
